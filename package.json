@@ -1,0 +1,34 @@
+{
+  "name": "codequest",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeQuest — a level-based coding contest platform (monorepo: Express API + React SPA).",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "node run.js",
+    "dev:client": "npm run dev --workspace codequest-client",
+    "dev:server": "npm run dev --workspace codequest-server",
+    "build": "npm run build --workspace codequest-server && npm run build --workspace codequest-client",
+    "build:client": "npm run build --workspace codequest-client",
+    "build:server": "npm run build --workspace codequest-server",
+    "start": "npm run start --workspace codequest-server",
+    "lint": "npm run lint --workspace codequest-server && npm run lint --workspace codequest-client",
+    "typecheck": "npm run typecheck --workspace codequest-server && npm run typecheck --workspace codequest-client",
+    "test": "npm run test --workspace codequest-server",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "db:migrate": "npm run db:migrate --workspace codequest-server",
+    "db:seed": "npm run db:seed --workspace codequest-server",
+    "db:reset": "npm run db:reset --workspace codequest-server",
+    "db:setup": "npm run db:setup --workspace codequest-server",
+    "db:test": "npm run db:test --workspace codequest-server",
+    "admin:create": "npm run admin:create --workspace codequest-server",
+    "admin:reset-password": "npm run admin:reset-password --workspace codequest-server"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  }
+}

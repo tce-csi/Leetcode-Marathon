@@ -1,0 +1,204 @@
+@import "tailwindcss";
+
+/*
+ * CodeQuest — monochrome design system.
+ *
+ * The whole UI is built from a small set of semantic tokens so that every page,
+ * dialog and admin screen automatically supports both themes. Light theme is the
+ * default; adding `.dark` to <html> swaps the underlying variables. A tiny inline
+ * script in index.html applies the class before first paint to avoid flashes.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Neutral palette (light defaults). Overridden under `.dark`. */
+  --color-background: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-2: #f6f6f7;
+  --color-surface-3: #ececee;
+  --color-border: #e5e5e7;
+  --color-border-strong: #d3d3d7;
+  --color-muted: #71717a;
+  --color-muted-strong: #3f3f46;
+  --color-foreground: #101012;
+
+  /* Brand — a strict, high-contrast black (inverts to white in dark mode). */
+  --color-brand: #101012;
+  --color-brand-soft: #3f3f46;
+  --color-brand-strong: #000000;
+  --color-accent: #101012;
+  --color-accent-soft: #3f3f46;
+
+  /* Status — tinted greys only; meaning comes from labels + icons. */
+  --color-success: #18181b;
+  --color-warning: #52525b;
+  --color-danger: #18181b;
+  --color-info: #52525b;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+}
+
+.dark {
+  --color-background: #0a0a0b;
+  --color-surface: #121214;
+  --color-surface-2: #18181b;
+  --color-surface-3: #26262b;
+  --color-border: #26262b;
+  --color-border-strong: #3a3a42;
+  --color-muted: #8b8b93;
+  --color-muted-strong: #b6b6be;
+  --color-foreground: #fafafa;
+
+  --color-brand: #fafafa;
+  --color-brand-soft: #d4d4d8;
+  --color-brand-strong: #ffffff;
+  --color-accent: #fafafa;
+  --color-accent-soft: #d4d4d8;
+
+  --color-success: #fafafa;
+  --color-warning: #a1a1aa;
+  --color-danger: #fafafa;
+  --color-info: #a1a1aa;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    color-scheme: light;
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    min-height: 100dvh;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-foreground) 20%, transparent);
+    color: var(--color-foreground);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-foreground);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: 9999px;
+    border: 2px solid var(--color-background);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-muted);
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .glass {
+    background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    backdrop-filter: blur(12px);
+  }
+
+  /* Fine diagonal hairline used as a subtle, non-decorative texture. */
+  .hairline-grid {
+    background-image:
+      linear-gradient(to right, var(--color-border) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .animate-in-up {
+    animation: in-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes in-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade {
+    animation: fade 0.25s ease-out both;
+  }
+
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--color-surface-2) 25%,
+      var(--color-surface-3) 37%,
+      var(--color-surface-2) 63%
+    );
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: 100% 50%;
+    }
+    100% {
+      background-position: 0 50%;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

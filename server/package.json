@@ -1,0 +1,59 @@
+{
+  "name": "codequest-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeQuest API - Express + TypeScript backend.",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsup",
+    "start": "node dist/server.js",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts",
+    "db:reset": "tsx scripts/migrate.ts --reset",
+    "db:setup": "tsx scripts/migrate.ts && tsx scripts/seed.ts",
+    "db:test": "tsx scripts/test-db.ts",
+    "admin:create": "tsx scripts/create-admin.ts",
+    "admin:reset-password": "tsx scripts/reset-admin-password.ts",
+    "verify": "npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.3",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.7",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "pg": "^8.23.1",
+    "serverless-http": "^4.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@eslint/js": "^9.39.5",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.18",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^6.0.3",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0",
+    "supertest": "^7.1.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  }
+}
