@@ -24,10 +24,17 @@ import {
 import { getTracks, requireCurrentContest, updateContest } from "@/lib/services/contest";
 import { computeContestStatus } from "@/lib/services/contest";
 import { listFlags, resolveFlag } from "@/lib/services/flags";
-import { listStudents, type StudentListFilters } from "@/lib/services/students";
-import { listSubmissionsForReview, reviewSubmission, type ReviewQueueFilters } from "@/lib/services/submissions";
+import { listStudents, getStudentProfile, type StudentListFilters } from "@/lib/services/students";
+import {
+  listSubmissionsForReview,
+  reviewSubmission,
+  setSubmissionReviewState,
+  requestSubmissionCode,
+  type ReviewQueueFilters,
+} from "@/lib/services/submissions";
 import { getEvidenceSignedUrl } from "@/lib/storage";
-import type { SubmissionStatus, Year } from "@/lib/types";
+import { listFinishers, getFinisherStats, updateFinalistStatus } from "@/lib/services/finishers";
+import type { FinalistStatus, SubmissionStatus, Year } from "@/lib/types";
 import {
   contestUpdateSchema,
   levelCreateSchema,
@@ -39,7 +46,12 @@ import {
   studentIdentityUpdateSchema,
   trackUpdateSchema,
 } from "@/lib/validation/admin";
-import { reviewSchema } from "@/lib/validation/submission";
+import {
+  reviewSchema,
+  adminReviewStateSchema,
+  codeRequestSchema,
+  finalistStatusSchema,
+} from "@/lib/validation/submission";
 
 export const adminRoutes = Router();
 
@@ -453,5 +465,138 @@ adminRoutes.get(
         .slice(0, 10)}.csv"`,
     );
     res.send(csv);
+  }),
+);
+
+// ------------------------------ student profile ----------------------------
+
+adminRoutes.get(
+  "/students/:studentId/profile",
+  asyncHandler(async (req, res) => {
+    await requireAdmin(req);
+    const contest = await requireCurrentContest();
+    const studentId = String(req.params.studentId ?? "");
+    if (!studentId) throw errors.badRequest("studentId is required.");
+    const profile = await getStudentProfile(contest.id, studentId);
+    if (!profile) throw errors.notFound("Student not found.");
+    ok(res, { profile });
+  }),
+);
+
+// ------------------------------ submission review state & code requests ----
+
+adminRoutes.patch(
+  "/submissions/:id/review-state",
+  asyncHandler(async (req, res) => {
+    const session = await requireAdminMutation(req, ["SUPER_ADMIN", "ADMIN", "REVIEWER"]);
+    const body = adminReviewStateSchema.parse({ ...req.body, submissionId: req.params.id });
+    const submission = await setSubmissionReviewState(session.admin.id, body, { ip: req.ip });
+    ok(res, { submission });
+  }),
+);
+
+adminRoutes.post(
+  "/submissions/:id/request-code",
+  asyncHandler(async (req, res) => {
+    const session = await requireAdminMutation(req, ["SUPER_ADMIN", "ADMIN", "REVIEWER"]);
+    const body = codeRequestSchema.parse({ submissionId: req.params.id });
+    const submission = await requestSubmissionCode(session.admin.id, body.submissionId, { ip: req.ip });
+    ok(res, { submission });
+  }),
+);
+
+// ------------------------------ finishers ----------------------------------
+
+adminRoutes.get(
+  "/finishers",
+  asyncHandler(async (req, res) => {
+    await requireAdmin(req);
+    const contest = await requireCurrentContest();
+    const yearParam = String(req.query.year ?? "1");
+    const year = (yearParam === "2" ? 2 : 1) as Year;
+    const status = typeof req.query.status === "string" ? (req.query.status as FinalistStatus | "ALL") : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search : undefined;
+    const sortBy = req.query.sortBy === "elapsed" ? "elapsed" : "finished_at";
+    const verifiedOnly = req.query.verifiedOnly === "true";
+
+    const [finishers, stats] = await Promise.all([
+      listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly }),
+      getFinisherStats(contest.id, year),
+    ]);
+
+    ok(res, { finishers, stats, year });
+  }),
+);
+
+adminRoutes.get(
+  "/finishers/export",
+  asyncHandler(async (req, res) => {
+    await requireAdmin(req);
+    const contest = await requireCurrentContest();
+    const yearParam = String(req.query.year ?? "1");
+    const year = (yearParam === "2" ? 2 : 1) as Year;
+    const status = typeof req.query.status === "string" ? (req.query.status as FinalistStatus | "ALL") : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search : undefined;
+    const sortBy = req.query.sortBy === "elapsed" ? "elapsed" : "finished_at";
+    const verifiedOnly = req.query.verifiedOnly === "true";
+
+    const finishers = await listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly });
+    const headers = [
+      "Rank",
+      "Roll Number",
+      "Full Name",
+      "Year",
+      "LeetCode Username",
+      "Completed Levels",
+      "Total Levels",
+      "Finished At (UTC)",
+      "Elapsed Duration (ms)",
+      "Elapsed Time",
+      "Finalist Status",
+      "Total Points",
+    ];
+    const lines = [headers.join(",")];
+    for (const f of finishers) {
+      lines.push(
+        [
+          f.rank,
+          f.rollNumber,
+          f.fullName,
+          f.year,
+          f.leetcodeUsername,
+          f.completedLevels,
+          f.totalLevels,
+          f.finishedAt,
+          f.elapsedDurationMs,
+          f.elapsedFormatted,
+          f.finalistStatus,
+          f.totalPoints,
+        ]
+          .map(csvEscape)
+          .join(","),
+      );
+    }
+    const csv = `\uFEFF${lines.join("\n")}`;
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="codequest-finishers-year${year}-${new Date()
+        .toISOString()
+        .slice(0, 10)}.csv"`,
+    );
+    res.send(csv);
+  }),
+);
+
+// ------------------------------ finalist verification ----------------------
+
+adminRoutes.patch(
+  "/students/:studentId/finalist-status",
+  asyncHandler(async (req, res) => {
+    const session = await requireAdminMutation(req, ["SUPER_ADMIN", "ADMIN"]);
+    const studentId = String(req.params.studentId ?? "");
+    const body = finalistStatusSchema.parse(req.body);
+    const student = await updateFinalistStatus(session.admin.id, studentId, body);
+    ok(res, { student });
   }),
 );

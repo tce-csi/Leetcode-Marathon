@@ -44,14 +44,23 @@ export async function getLeaderboard(
   const limit = options.limit ?? 200;
   const { rows } = await db.query<LeaderboardRow>(
     `select s.id, s.full_name, s.roll_number, s.year,
-            coalesce(sum(se.points), 0)::int as total_points,
-            count(distinct slp.level_id)::int as levels_completed,
-            max(se.created_at) as last_score_at
+            coalesce(scores.total_points, 0)::int as total_points,
+            coalesce(prog.levels_completed, 0)::int as levels_completed,
+            scores.last_score_at
        from students s
-       left join score_events se on se.student_id = s.id and se.contest_id = $1
-       left join student_level_progress slp on slp.student_id = s.id and slp.status = 'COMPLETED'
+       left join (
+         select student_id, sum(points)::int as total_points, max(created_at) as last_score_at
+           from score_events
+          where contest_id = $1
+          group by student_id
+       ) scores on scores.student_id = s.id
+       left join (
+         select student_id, count(distinct level_id)::int as levels_completed
+           from student_level_progress
+          where status = 'COMPLETED'
+          group by student_id
+       ) prog on prog.student_id = s.id
       where s.contest_id = $1 and s.year = $2 and s.is_active = true
-      group by s.id
       order by ${orderByClause(contest.ranking_rule)}
       limit $3`,
     [contest.id, year, limit],

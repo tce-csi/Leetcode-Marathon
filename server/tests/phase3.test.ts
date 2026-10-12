@@ -326,8 +326,16 @@ describe("suspicious activity flags", () => {
     ).student;
     const url = "https://leetcode.com/problems/two-sum/submissions/999/";
 
-    const subA = await createSubmission(await studentEntity(a.id), { levelId: level1, submissionUrl: url }, { db });
-    await createSubmission(await studentEntity(b.id), { levelId: level1, submissionUrl: url }, { db });
+    const subA = await createSubmission(
+      await studentEntity(a.id),
+      { levelId: level1, submissionUrl: url, sourceCode: "def solution(): pass" },
+      { db },
+    );
+    await createSubmission(
+      await studentEntity(b.id),
+      { levelId: level1, submissionUrl: url, sourceCode: "def solution(): pass" },
+      { db },
+    );
 
     const flags = await listFlags(contestId, { openOnly: true }, db);
     const dup = flags.find((f) => f.kind === "DUPLICATE_SUBMISSION_URL");
@@ -354,7 +362,11 @@ describe("suspicious activity flags", () => {
     ).student;
     const submission = await createSubmission(
       await studentEntity(student.id),
-      { levelId: level1, submissionUrl: "https://leetcode.com/problems/two-sum/submissions/777/" },
+      {
+        levelId: level1,
+        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/777/",
+        sourceCode: "def solution(): pass",
+      },
       { db },
     );
     const { rows } = await db.query<ContestRow>("select * from contests where id = $1", [contestId]);
@@ -417,10 +429,18 @@ describe("suspicious activity flags", () => {
       )
     ).student;
     const url = "https://leetcode.com/problems/two-sum/submissions/222/";
-    await createSubmission(await studentEntity(other.id), { levelId: level1, submissionUrl: url }, { db });
+    await createSubmission(
+      await studentEntity(other.id),
+      { levelId: level1, submissionUrl: url, sourceCode: "def solution(): pass" },
+      { db },
+    );
     const targetSubmission = await createSubmission(
       await studentEntity(target.id),
-      { levelId: level1, submissionUrl: "https://leetcode.com/problems/two-sum/submissions/333/" },
+      {
+        levelId: level1,
+        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/333/",
+        sourceCode: "def solution(): pass",
+      },
       { db },
     );
 

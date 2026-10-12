@@ -2,10 +2,12 @@ import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   Activity,
-  ClipboardCheck,
+  ArrowRight,
   Clock,
+  Flag,
   Layers,
   ScrollText,
+  ShieldCheck,
   Trophy,
   Users,
 } from "lucide-react";
@@ -64,11 +66,97 @@ export default function AdminOverviewPage() {
         }
       />
 
-      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat icon={<Users className="size-5" />} label="Registered students" value={stats.totalStudents} tone="brand" sub={`${stats.firstYear} first · ${stats.secondYear} second`} />
-        <Stat icon={<Activity className="size-5" />} label="Active participants" value={stats.participants} tone="success" sub={`${stats.activeStudents} accounts enabled`} />
-        <Stat icon={<ClipboardCheck className="size-5" />} label="Pending reviews" value={stats.pendingReviews} tone="warning" sub={`${stats.totalSubmissions} submissions total`} />
-        <Stat icon={<Trophy className="size-5" />} label="Levels completed" value={stats.completedLevels} tone="accent" sub={`${stats.verifiedSubmissions} verified solutions`} />
+      {/* Quick operational navigation links */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Link to="/admin/finishers">
+          <Card className="p-4 hover:border-foreground transition-colors group">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Trophy className="size-5 text-foreground" />
+                <div>
+                  <p className="font-bold text-sm text-foreground">View Finishers</p>
+                  <p className="text-xs text-muted">Identify fastest completions</p>
+                </div>
+              </div>
+              <ArrowRight className="size-4 text-muted group-hover:text-foreground group-hover:translate-x-0.5 transition-all" />
+            </div>
+          </Card>
+        </Link>
+
+        <Link to="/admin/students">
+          <Card className="p-4 hover:border-foreground transition-colors group">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Users className="size-5 text-foreground" />
+                <div>
+                  <p className="font-bold text-sm text-foreground">View Students</p>
+                  <p className="text-xs text-muted">Manage participants & history</p>
+                </div>
+              </div>
+              <ArrowRight className="size-4 text-muted group-hover:text-foreground group-hover:translate-x-0.5 transition-all" />
+            </div>
+          </Card>
+        </Link>
+
+        <Link to="/admin/flags">
+          <Card className="p-4 hover:border-foreground transition-colors group">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Flag className="size-5 text-foreground" />
+                <div>
+                  <p className="font-bold text-sm text-foreground">View Flags</p>
+                  <p className="text-xs text-muted">Review suspicious signals</p>
+                </div>
+              </div>
+              <ArrowRight className="size-4 text-muted group-hover:text-foreground group-hover:translate-x-0.5 transition-all" />
+            </div>
+          </Card>
+        </Link>
+      </div>
+
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <Stat
+          icon={<Users className="size-4" />}
+          label="Registered"
+          value={stats.totalStudents}
+          tone="brand"
+          sub={`${stats.firstYear} 1st · ${stats.secondYear} 2nd`}
+        />
+        <Stat
+          icon={<Activity className="size-4" />}
+          label="Active"
+          value={stats.activeStudents}
+          tone="success"
+          sub={`${stats.participants} participating`}
+        />
+        <Stat
+          icon={<Trophy className="size-4" />}
+          label="Total Finishers"
+          value={stats.totalFinishers}
+          tone="accent"
+          sub="Completed all levels"
+        />
+        <Stat
+          icon={<Clock className="size-4" />}
+          label="Pending Review"
+          value={stats.pendingFinalists}
+          tone="warning"
+          sub="Unverified finishers"
+        />
+        <Stat
+          icon={<ShieldCheck className="size-4" />}
+          label="Verified Winners"
+          value={stats.verifiedFinalists}
+          tone="success"
+          sub="Confirmed finalists"
+        />
+        <Stat
+          icon={<Flag className="size-4" />}
+          label="Flagged"
+          value={stats.flaggedParticipants}
+          tone={stats.flaggedParticipants > 0 ? "warning" : "brand"}
+          sub="Integrity alerts"
+        />
       </section>
 
       <div className="grid gap-6 lg:grid-cols-3">

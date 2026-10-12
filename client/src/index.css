@@ -123,6 +123,28 @@
   button {
     font: inherit;
   }
+
+  select {
+    color-scheme: light;
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+  }
+
+  html.dark select {
+    color-scheme: dark;
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+  }
+
+  select option {
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+  }
+
+  html.dark select option {
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+  }
 }
 
 @layer utilities {

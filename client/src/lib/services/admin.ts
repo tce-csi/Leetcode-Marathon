@@ -9,9 +9,12 @@ export interface AdminStats {
   secondYear: number;
   activeStudents: number;
   participants: number;
+  totalFinishers: number;
+  pendingFinalists: number;
+  verifiedFinalists: number;
+  flaggedParticipants: number;
   totalSubmissions: number;
   verifiedSubmissions: number;
-  pendingReviews: number;
   completedLevels: number;
   totalLevels: number;
   completionRate: number;

@@ -13,9 +13,10 @@ import AdminFlagsPage from "@/pages/admin/AdminFlagsPage";
 import AdminLevelDetailPage from "@/pages/admin/AdminLevelDetailPage";
 import AdminLevelsPage from "@/pages/admin/AdminLevelsPage";
 import AdminOverviewPage from "@/pages/admin/AdminOverviewPage";
-import AdminReviewsPage from "@/pages/admin/AdminReviewsPage";
 import AdminSettingsPage from "@/pages/admin/AdminSettingsPage";
 import AdminStudentsPage from "@/pages/admin/AdminStudentsPage";
+import AdminStudentReviewProfilePage from "@/pages/admin/AdminStudentReviewProfilePage";
+import AdminFinishersPage from "@/pages/admin/AdminFinishersPage";
 
 export function App() {
   return (
@@ -36,9 +37,11 @@ export function App() {
         <Route index element={<AdminOverviewPage />} />
         <Route path="levels" element={<AdminLevelsPage />} />
         <Route path="levels/:id" element={<AdminLevelDetailPage />} />
-        <Route path="reviews" element={<AdminReviewsPage />} />
+        <Route path="finishers" element={<AdminFinishersPage />} />
+        <Route path="reviews" element={<Navigate to="/admin/finishers" replace />} />
         <Route path="flags" element={<AdminFlagsPage />} />
         <Route path="students" element={<AdminStudentsPage />} />
+        <Route path="students/:studentId" element={<AdminStudentReviewProfilePage />} />
         <Route path="settings" element={<AdminSettingsPage />} />
         <Route path="audit" element={<AdminAuditPage />} />
       </Route>

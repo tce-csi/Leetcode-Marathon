@@ -1,9 +1,13 @@
 import type {
   Difficulty,
+  FinalistStatus,
   ProgressStatus,
+  SubmissionReviewState,
   SubmissionStatus,
   Year,
 } from "@/lib/types";
+
+const IST_TZ = "Asia/Kolkata";
 
 export function formatDate(value: string | null | undefined, timezone?: string): string {
   if (!value) return "—";
@@ -11,16 +15,60 @@ export function formatDate(value: string | null | undefined, timezone?: string):
     return new Intl.DateTimeFormat("en-IN", {
       dateStyle: "medium",
       timeStyle: "short",
-      timeZone: timezone || undefined,
+      timeZone: timezone || IST_TZ,
     }).format(new Date(value));
   } catch {
     return new Date(value).toLocaleString();
   }
 }
 
+/** Formats a UTC timestamp as IST with full date + time. */
+export function formatIST(value: string | null | undefined): string {
+  if (!value) return "—";
+  try {
+    return new Intl.DateTimeFormat("en-IN", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+      timeZone: IST_TZ,
+    }).format(new Date(value));
+  } catch {
+    return "—";
+  }
+}
+
+/** Formats a UTC timestamp as IST time only with seconds (e.g. 2:42:15 PM). */
+export function formatISTTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  try {
+    return new Intl.DateTimeFormat("en-IN", {
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+      hour12: true,
+      timeZone: IST_TZ,
+    }).format(new Date(value));
+  } catch {
+    return "—";
+  }
+}
+
+/** Formats duration in milliseconds to HH:MM:SS */
+export function formatElapsed(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || ms < 0) return "—";
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    String(hours).padStart(2, "0"),
+    String(minutes).padStart(2, "0"),
+    String(seconds).padStart(2, "0"),
+  ].join(":");
+}
+
 export function formatDateShort(value: string | null | undefined): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeZone: IST_TZ }).format(new Date(value));
 }
 
 export function formatRelative(value: string | null | undefined): string {
@@ -85,6 +133,20 @@ export const submissionMeta: Record<SubmissionStatus, { label: string; className
   PENDING_REVIEW: { label: "Pending verification", className: TONE_MEDIUM },
   VERIFIED: { label: "Verified", className: TONE_STRONG },
   REJECTED: { label: "Rejected", className: TONE_OUTLINE },
+};
+
+export const reviewStateMeta: Record<SubmissionReviewState, { label: string; className: string }> = {
+  NOT_REVIEWED: { label: "Not reviewed", className: TONE_MUTED },
+  REVIEWED_VALID: { label: "Valid", className: TONE_STRONG },
+  REVIEWED_INVALID: { label: "Invalid", className: TONE_OUTLINE },
+  FLAGGED: { label: "Flagged", className: TONE_MEDIUM },
+};
+
+export const finalistStatusMeta: Record<FinalistStatus, { label: string; className: string }> = {
+  PROVISIONAL: { label: "Provisional", className: TONE_SUBTLE },
+  UNDER_REVIEW: { label: "Under Review", className: TONE_MEDIUM },
+  VERIFIED: { label: "Verified Finalist", className: TONE_STRONG },
+  DISQUALIFIED: { label: "Disqualified", className: TONE_OUTLINE },
 };
 
 export function yearLabel(year: Year): string {

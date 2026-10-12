@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -10,6 +10,7 @@ import {
   Send,
   ShieldCheck,
   Trophy,
+  Upload,
   XCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { difficultyMeta, formatDate, progressMeta } from "@/lib/format";
 import type { AssessmentState, PhaseState, SubmitResult } from "@/lib/services/assessments";
 import type { ContestStatus } from "@/lib/services/contest";
+import type { ProgressSummary } from "@/lib/services/progression";
 import type {
   AssessmentAttemptRow,
   CodingSubmissionRow,
@@ -32,10 +34,15 @@ import type {
   RoadmapLevel,
 } from "@/lib/types";
 
+import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/query-client";
+import { LanguageSelect } from "@/components/ui/language-select";
+
 interface LevelResponse {
   level: {
     id: string;
     levelNumber: number;
+    totalLevels?: number;
     title: string;
     description: string;
     teaser: string;
@@ -48,6 +55,7 @@ interface LevelResponse {
     maxAttempts: number;
     status: ProgressStatus;
   };
+  totalLevels?: number;
   problem: { title: string; url: string; slug: string } | null;
   assessment: AssessmentState;
   attempts: AssessmentAttemptRow[];
@@ -56,8 +64,21 @@ interface LevelResponse {
   screenshotStorageEnabled: boolean;
 }
 
+interface LevelPageData extends LevelResponse {
+  nextLevel: RoadmapLevel | null;
+}
+
+interface SubmissionResponse {
+  submission: CodingSubmissionRow;
+  nextLevel: RoadmapLevel | null;
+  completed: boolean;
+  levels?: RoadmapLevel[];
+  summary?: ProgressSummary;
+}
+
 interface RoadmapResponse {
   levels: RoadmapLevel[];
+  summary?: ProgressSummary;
 }
 
 function findNextLevel(levels: RoadmapLevel[] | null, currentId: string): RoadmapLevel | null {
@@ -70,39 +91,77 @@ function findNextLevel(levels: RoadmapLevel[] | null, currentId: string): Roadma
 
 export default function LevelPage() {
   const params = useParams<{ levelId: string }>();
-  const levelId = params.levelId;
-  const [data, setData] = useState<LevelResponse | null>(null);
-  const [nextLevel, setNextLevel] = useState<RoadmapLevel | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const levelId = params.levelId ?? "";
 
-  const load = useCallback(async () => {
-    try {
+  const {
+    data,
+    isLoading: loading,
+    error: queryError,
+    refetch,
+  } = useQuery<LevelPageData>({
+    queryKey: ["student", "level", levelId],
+    queryFn: async () => {
       const [result, roadmap] = await Promise.all([
         api.get<LevelResponse>(`/api/student/levels/${levelId}`),
         api.get<RoadmapResponse>("/api/student/roadmap").catch(() => null),
       ]);
-      setData(result);
-      setNextLevel(findNextLevel(roadmap?.levels ?? null, levelId ?? ""));
-      setError(null);
-    } catch (err) {
-      setError(isApiError(err) ? err.message : "Unable to load this level.");
-    } finally {
-      setLoading(false);
-    }
-  }, [levelId]);
+      return {
+        ...result,
+        nextLevel: findNextLevel(roadmap?.levels ?? null, levelId),
+      };
+    },
+    refetchInterval: 12000,
+    enabled: Boolean(levelId),
+  });
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  const load = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["student"] });
+    refetch();
+  }, [refetch]);
+
+  const handleSubmissionSuccess = useCallback(
+    (res: SubmissionResponse) => {
+      queryClient.setQueryData<LevelPageData>(["student", "level", levelId], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          submission: res.submission,
+          level: {
+            ...old.level,
+            status: "COMPLETED",
+          },
+          nextLevel: res.nextLevel ?? old.nextLevel,
+        };
+      });
+
+      if (res.levels || res.summary) {
+        queryClient.setQueryData<RoadmapResponse>(["student", "roadmap"], (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            levels: res.levels ?? old.levels,
+            summary: res.summary ?? old.summary,
+          };
+        });
+      }
+
+      queryClient.invalidateQueries({ queryKey: ["student", "roadmap"] });
+    },
+    [levelId],
+  );
 
   if (loading) return <PageLoader label="Loading challenge" />;
-  if (error || !data) {
+  if (queryError || !data) {
+    const errorMsg = queryError
+      ? isApiError(queryError)
+        ? queryError.message
+        : "Unable to load this level."
+      : "This level could not be loaded.";
     return (
       <EmptyState
         icon={<AlertCircle className="size-5" />}
         title="Level unavailable"
-        description={error ?? "This level could not be loaded."}
+        description={errorMsg}
         action={
           <Link to="/dashboard">
             <Button variant="secondary">Back to contest</Button>
@@ -112,7 +171,8 @@ export default function LevelPage() {
     );
   }
 
-  const { level, problem, assessment, attempts, submission, screenshotStorageEnabled } = data;
+  const { level, problem, assessment, attempts, submission, screenshotStorageEnabled, nextLevel } = data;
+  const totalLevels = data.totalLevels ?? level.totalLevels ?? (nextLevel ? nextLevel.levelNumber : 10);
   const difficulty = difficultyMeta[level.difficulty];
   const status = progressMeta[level.status];
   const beforePhases = assessment.phases.filter((phase) => phase.phase === "BEFORE");
@@ -133,7 +193,7 @@ export default function LevelPage() {
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-            LEVEL {String(level.levelNumber).padStart(2, "0")} / 10
+            LEVEL {String(level.levelNumber).padStart(2, "0")} / {String(totalLevels).padStart(2, "0")}
           </p>
           <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">{level.title}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -227,6 +287,7 @@ export default function LevelPage() {
             levelId={level.id}
             screenshotStorageEnabled={screenshotStorageEnabled}
             existing={submission}
+            onSubmissionSuccess={handleSubmissionSuccess}
             onSubmitted={load}
           />
         )
@@ -265,9 +326,9 @@ export default function LevelPage() {
         <Card className="border-foreground/40 p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
-              <CheckCircle2 className="size-6" />
+              <CheckCircle2 className="size-6 text-foreground" />
               <div>
-                <p className="font-semibold">Level Completed</p>
+                <p className="font-semibold">Attempt Recorded · Next Level Unlocked</p>
                 <p className="text-sm text-muted">
                   {nextLevel
                     ? `Up next: Level ${String(nextLevel.levelNumber).padStart(2, "0")} — ${nextLevel.title}`
@@ -278,7 +339,7 @@ export default function LevelPage() {
             {nextLevel ? (
               <Link to={`/dashboard/level/${nextLevel.id}`} className="shrink-0">
                 <Button size="lg">
-                  Next Level →
+                  Continue to Level {String(nextLevel.levelNumber).padStart(2, "0")} →
                 </Button>
               </Link>
             ) : (
@@ -523,18 +584,46 @@ function SubmissionPanel({
   levelId,
   screenshotStorageEnabled,
   existing,
+  onSubmissionSuccess,
   onSubmitted,
 }: {
   levelId: string;
   screenshotStorageEnabled: boolean;
   existing: CodingSubmissionRow | null;
-  onSubmitted: () => void;
+  onSubmissionSuccess?: (res: SubmissionResponse) => void;
+  onSubmitted?: () => void;
 }) {
   const [submissionUrl, setSubmissionUrl] = useState(existing?.submission_url ?? "");
   const [note, setNote] = useState(existing?.student_note ?? "");
   const [screenshotPath, setScreenshotPath] = useState(existing?.screenshot_path ?? "");
+  const [sourceCode, setSourceCode] = useState(existing?.source_code ?? "");
+  const [programmingLanguage, setProgrammingLanguage] = useState(existing?.programming_language ?? "python");
+  const [codeFileName, setCodeFileName] = useState(existing?.code_file_name ?? "");
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const handleCodeFile = (file: File) => {
+    setCodeFileName(file.name);
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext === "py") setProgrammingLanguage("python");
+    else if (ext === "cpp" || ext === "cc" || ext === "cxx") setProgrammingLanguage("cpp");
+    else if (ext === "c") setProgrammingLanguage("c");
+    else if (ext === "java") setProgrammingLanguage("java");
+    else if (ext === "js") setProgrammingLanguage("javascript");
+    else if (ext === "ts") setProgrammingLanguage("typescript");
+    else if (ext === "go") setProgrammingLanguage("go");
+    else if (ext === "rs") setProgrammingLanguage("rust");
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      if (content) {
+        setSourceCode(content);
+        toast.success(`Loaded ${file.name}`);
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const handleUpload = async (file: File) => {
     setUploading(true);
@@ -553,20 +642,30 @@ function SubmissionPanel({
   };
 
   const handleSubmit = async () => {
-    if (!submissionUrl && !screenshotPath && !note.trim()) {
-      toast.error("Add a submission URL, screenshot, or note.");
+    if (!submissionUrl.trim()) {
+      toast.error("LeetCode submission URL is required.");
+      return;
+    }
+    if (!sourceCode.trim()) {
+      toast.error("Complete solution source code is required. Please paste your code or upload a solution file.");
       return;
     }
     setSubmitting(true);
     try {
-      await api.post("/api/student/submissions", {
+      const res = await api.post<SubmissionResponse>("/api/student/submissions", {
         levelId,
-        submissionUrl: submissionUrl || undefined,
+        submissionUrl: submissionUrl.trim(),
         screenshotPath: screenshotPath || undefined,
         note: note || undefined,
+        sourceCode: sourceCode.trim(),
+        programmingLanguage: programmingLanguage || "python",
+        codeFileName: codeFileName || undefined,
       });
-      toast.success("Submission received. Awaiting verification.");
-      onSubmitted();
+      toast.success("Attempt recorded. Next level unlocked.");
+      if (onSubmissionSuccess) {
+        onSubmissionSuccess(res);
+      }
+      onSubmitted?.();
     } catch (error) {
       toast.error(isApiError(error) ? error.message : "Could not submit.");
     } finally {
@@ -576,7 +675,7 @@ function SubmissionPanel({
 
   const status = existing
     ? existing.status === "PENDING_REVIEW"
-      ? { label: "Pending Review", className: "border-border-strong bg-surface-3 text-foreground" }
+      ? { label: "Attempt Recorded", className: "border-border-strong bg-surface-3 text-foreground" }
       : existing.status === "REJECTED"
         ? { label: "Rejected", className: "border-foreground bg-transparent text-foreground" }
         : { label: "Verified", className: "border-foreground bg-foreground text-background" }
@@ -586,15 +685,27 @@ function SubmissionPanel({
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle>Report Your Submission</CardTitle>
+          <CardTitle>Report Your Solution</CardTitle>
           <Badge className={status.className}>{status.label}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {existing?.code_requested ? (
+          <div className="flex items-start gap-2 rounded-lg border border-foreground bg-foreground/5 p-3 text-sm text-foreground">
+            <AlertCircle className="mt-0.5 size-4 shrink-0 text-foreground" />
+            <div>
+              <p className="font-semibold">Source code requested by organizer</p>
+              <p className="text-xs text-muted-strong mt-0.5">
+                The contest administrators have requested you to provide your source code solution for this level.
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         {existing?.status === "PENDING_REVIEW" ? (
           <div className="flex items-start gap-2 rounded-lg border border-border-strong bg-surface-2 p-3 text-sm text-muted-strong">
             <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-            <p>Submission received. Awaiting verification.</p>
+            <p>Attempt recorded. Next level unlocked. Official score will be verified during audit.</p>
           </div>
         ) : null}
 
@@ -605,13 +716,63 @@ function SubmissionPanel({
           </div>
         ) : null}
 
-        <Field label="Solution URL (LeetCode submission link)">
+        <Field label="LeetCode Submission URL (Required)">
           <Input
             placeholder="https://leetcode.com/submissions/detail/..."
             value={submissionUrl}
             onChange={(e) => setSubmissionUrl(e.target.value)}
           />
         </Field>
+
+        {/* Solution Code Section (Mandatory) */}
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label className="text-xs font-semibold uppercase tracking-wide text-muted-strong">
+              Solution Code (Required)
+            </label>
+            <span className="text-[11px] text-muted">
+              Paste your solution or upload a code file below
+            </span>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-border bg-surface-2/40 p-3.5">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex-1 min-w-[140px]">
+                <label className="text-[10px] uppercase font-bold text-muted mb-1 block">
+                  Programming Language
+                </label>
+                <LanguageSelect
+                  value={programmingLanguage}
+                  onChange={setProgrammingLanguage}
+                />
+              </div>
+
+              <div className="pt-4">
+                <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-surface-1 px-3 py-2 text-xs font-medium hover:border-border-strong">
+                  <Upload className="size-3.5 text-muted" />
+                  {codeFileName ? codeFileName : "Upload solution file"}
+                  <input
+                    type="file"
+                    accept=".py,.cpp,.cc,.c,.java,.js,.ts,.go,.rs,.txt"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleCodeFile(file);
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <Textarea
+              rows={8}
+              className="font-mono text-xs leading-relaxed"
+              placeholder="Paste your complete solution source code here..."
+              value={sourceCode}
+              onChange={(e) => setSourceCode(e.target.value)}
+            />
+          </div>
+        </div>
 
         <Field label="Note (optional)">
           <Textarea
@@ -654,8 +815,8 @@ function SubmissionPanel({
           )}
         </div>
 
-        <Button onClick={handleSubmit} loading={submitting}>
-          <Send className="size-4" /> Submit for Verification
+        <Button onClick={handleSubmit} loading={submitting} disabled={submitting}>
+          <Send className="size-4" /> Submit & Continue →
         </Button>
       </CardContent>
     </Card>

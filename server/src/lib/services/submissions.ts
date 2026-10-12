@@ -9,26 +9,46 @@ import {
   detectOutsideWindow,
   detectRepeatedRejections,
 } from "@/lib/services/flags";
-import { evaluateLevelCompletion, getLevelContext } from "@/lib/services/progression";
-import type { CodingSubmissionRow, LevelRow, ReviewDecision, StudentRow, SubmissionStatus, Year } from "@/lib/types";
+import { evaluateLevelCompletion, getLevelContext, getNextLevel } from "@/lib/services/progression";
+import type {
+  CodingSubmissionRow,
+  LevelRow,
+  ReviewDecision,
+  RoadmapLevel,
+  StudentRow,
+  SubmissionReviewState,
+  SubmissionStatus,
+  Year,
+} from "@/lib/types";
 import { runVerification, type VerificationOutcome } from "@/lib/verification";
-import type { SubmissionInput } from "@/lib/validation/submission";
+import type { AdminReviewStateInput, SubmissionInput } from "@/lib/validation/submission";
+
+export interface CodingSubmissionResult extends CodingSubmissionRow {
+  nextLevel?: RoadmapLevel | null;
+  completed?: boolean;
+}
 
 export interface SubmissionContext {
   db?: Db;
   ip?: string | null;
 }
 
-function assertHttpUrlOrEmpty(value: string | undefined): string | null {
-  if (!value) return null;
+function assertLeetCodeSubmissionUrl(value: string | undefined): string {
+  if (!value || !value.trim()) {
+    throw errors.badRequest("LeetCode submission URL is required.");
+  }
   let parsed: URL;
   try {
-    parsed = new URL(value);
+    parsed = new URL(value.trim());
   } catch {
     throw errors.badRequest("Submission URL is not a valid URL.");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw errors.badRequest("Submission URL must use http or https.");
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host !== "leetcode.com" && !host.endsWith(".leetcode.com")) {
+    throw errors.badRequest("Submission URL must be from leetcode.com.");
   }
   return parsed.toString();
 }
@@ -37,80 +57,88 @@ export async function createSubmission(
   student: StudentRow,
   input: SubmissionInput,
   ctx: SubmissionContext = {},
-): Promise<CodingSubmissionRow> {
+): Promise<CodingSubmissionResult> {
   const db = ctx.db ?? getDb();
-  const { level, problem, progress } = await getLevelContext(student, input.levelId, db);
-  const contest = await getContestById(student.contest_id, db);
-  if (!contest) throw errors.notFound("Contest not found.");
 
-  const now = new Date();
-  if (!isWithinContestWindowWithGrace(contest, now) && !contest.allow_late_submissions) {
-    throw errors.forbidden("The contest submission window has closed.");
+  const submissionUrl = assertLeetCodeSubmissionUrl(input.submissionUrl);
+  if (!input.sourceCode || !input.sourceCode.trim()) {
+    throw errors.badRequest("Complete solution source code is required.");
   }
-
-  const submissionUrl = assertHttpUrlOrEmpty(input.submissionUrl);
+  const sourceCode = input.sourceCode.trim();
   const screenshotPath = input.screenshotPath?.trim() || null;
   if (screenshotPath && !isValidEvidencePath(screenshotPath)) {
     throw errors.badRequest("The screenshot reference is invalid.");
   }
   const note = input.note?.trim() || null;
+  const programmingLanguage = input.programmingLanguage?.trim() || "python";
+  const codeFileName = input.codeFileName?.trim() || null;
 
-  const existing = await db.query<CodingSubmissionRow>(
-    `select * from coding_submissions
-      where student_id = $1 and level_id = $2 and status <> 'REJECTED'
-      order by created_at desc limit 1`,
-    [student.id, input.levelId],
-  );
-  const current = existing.rows[0];
-  if (current && current.status === "VERIFIED") {
-    throw errors.conflict("This level has already been verified.");
-  }
+  return db.transaction(async (tx) => {
+    const { level, problem, progress } = await getLevelContext(student, input.levelId, tx);
+    const contest = await getContestById(student.contest_id, tx);
+    if (!contest) throw errors.notFound("Contest not found.");
 
-  const outcome = await verifySubmission(
-    student,
-    level,
-    problem?.problem_slug ?? null,
-    contest,
-    submissionUrl,
-    contest.require_submission_after_unlock && progress.unlocked_at
-      ? new Date(progress.unlocked_at)
-      : null,
-  );
+    const now = new Date();
+    if (!isWithinContestWindowWithGrace(contest, now) && !contest.allow_late_submissions) {
+      throw errors.forbidden("The contest submission window has closed.");
+    }
 
-  const status: SubmissionStatus = outcome.status === "VERIFIED" ? "VERIFIED" : outcome.status === "REJECTED" ? "REJECTED" : "PENDING_REVIEW";
-  const isAutomatic = outcome.authoritative && status === "VERIFIED";
-  const verifiedSolvedAt = outcome.verifiedSolvedAt?.toISOString() ?? null;
-  const verifiedAt = status === "VERIFIED" ? now.toISOString() : null;
-
-  let saved: CodingSubmissionRow;
-  if (current) {
-    const updated = await db.query<CodingSubmissionRow>(
-      `update coding_submissions
-          set status = $2, verification_source = $3, submission_url = $4, screenshot_path = $5,
-              student_note = $6, problem_slug = $7, verdict = $8,
-              reported_solved_at = now(), verified_solved_at = $9, verified_at = $10
-        where id = $1 returning *`,
-      [
-        current.id,
-        status,
-        isAutomatic ? "AUTOMATIC" : "MANUAL",
-        submissionUrl,
-        screenshotPath,
-        note,
-        problem?.problem_slug ?? null,
-        outcome.verdict ?? null,
-        verifiedSolvedAt,
-        verifiedAt,
-      ],
+    // Check if level already has an active (non-rejected) submission
+    const existingActive = await tx.query<CodingSubmissionRow>(
+      `select * from coding_submissions
+        where student_id = $1 and level_id = $2 and status <> 'REJECTED'
+        order by created_at desc limit 1`,
+      [student.id, input.levelId],
     );
-    saved = updated.rows[0]!;
-  } else {
-    const inserted = await db.query<CodingSubmissionRow>(
+
+    if (existingActive.rows.length > 0) {
+      const existing = existingActive.rows[0]!;
+      if (existing.status === "VERIFIED") {
+        throw errors.conflict("This level has already been verified.");
+      }
+      // Idempotent retry: ensure progression completed and return with next level
+      await evaluateLevelCompletion(tx, student, level);
+      const nextLevel = await getNextLevel(tx, student.id, level);
+      return Object.assign(existing, { nextLevel, completed: true });
+    }
+
+    // Count existing attempts for attempt_number (all statuses preserved for audit)
+    const attemptCountResult = await tx.query<{ count: number }>(
+      `select count(*)::int as count from coding_submissions
+        where student_id = $1 and level_id = $2`,
+      [student.id, input.levelId],
+    );
+    const attemptNumber = (attemptCountResult.rows[0]?.count ?? 0) + 1;
+
+    const outcome = await verifySubmission(
+      student,
+      level,
+      problem?.problem_slug ?? null,
+      contest,
+      submissionUrl,
+      contest.require_submission_after_unlock && progress.unlocked_at
+        ? new Date(progress.unlocked_at)
+        : null,
+    );
+
+    const status: SubmissionStatus =
+      outcome.status === "VERIFIED"
+        ? "VERIFIED"
+        : outcome.status === "REJECTED"
+          ? "REJECTED"
+          : "PENDING_REVIEW";
+    const isAutomatic = outcome.authoritative && status === "VERIFIED";
+    const verifiedSolvedAt = outcome.verifiedSolvedAt?.toISOString() ?? null;
+    const verifiedAt = status === "VERIFIED" ? now.toISOString() : null;
+
+    // Always INSERT a new row in tx to preserve the complete attempt history for audit purposes.
+    const inserted = await tx.query<CodingSubmissionRow>(
       `insert into coding_submissions
          (student_id, level_id, problem_id, status, verification_source, submission_url,
           screenshot_path, student_note, problem_slug, verdict, reported_solved_at,
-          verified_solved_at, verified_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, $12)
+          verified_solved_at, verified_at, attempt_number, source_code,
+          programming_language, code_file_name)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, $12, $13, $14, $15, $16)
        returning *`,
       [
         student.id,
@@ -125,41 +153,50 @@ export async function createSubmission(
         outcome.verdict ?? null,
         verifiedSolvedAt,
         verifiedAt,
+        attemptNumber,
+        sourceCode,
+        programmingLanguage,
+        codeFileName,
       ],
     );
-    saved = inserted.rows[0]!;
-  }
+    const saved = inserted.rows[0]!;
 
-  await writeAudit(
-    {
-      actorType: "STUDENT",
-      actorId: student.id,
-      action: "submission.create",
-      entityType: "coding_submission",
-      entityId: saved.id,
-      metadata: { status, provider: outcome.provider, levelId: input.levelId },
-      ip: ctx.ip,
-    },
-    db,
-  );
+    await writeAudit(
+      {
+        actorType: "STUDENT",
+        actorId: student.id,
+        action: "submission.create",
+        entityType: "coding_submission",
+        entityId: saved.id,
+        metadata: { status, provider: outcome.provider, levelId: input.levelId, attemptNumber },
+        ip: ctx.ip,
+      },
+      tx,
+    );
 
-  if (status === "VERIFIED") {
-    await evaluateLevelCompletion(db, student, level);
-  }
+    // Evaluate completion immediately after any non-rejected submission. Progression
+    // no longer requires admin verification — admin review is an auditing step only.
+    let nextLevel: RoadmapLevel | null = null;
+    let completed = false;
+    if (status !== "REJECTED") {
+      completed = await evaluateLevelCompletion(tx, student, level);
+      nextLevel = await getNextLevel(tx, student.id, level);
+    }
 
-  // Anti-cheating signals are recorded for organiser review only. They never
-  // alter the submission outcome automatically.
-  await detectDuplicateSubmissionUrl(
-    contest.id,
-    student.id,
-    saved.id,
-    submissionUrl,
-    level.id,
-    db,
-  );
-  await detectOutsideWindow(contest, student.id, level.id, saved.id, db);
+    // Anti-cheating signals are recorded for organiser review only. They never
+    // alter the submission outcome automatically.
+    await detectDuplicateSubmissionUrl(
+      contest.id,
+      student.id,
+      saved.id,
+      submissionUrl,
+      level.id,
+      tx,
+    );
+    await detectOutsideWindow(contest, student.id, level.id, saved.id, tx);
 
-  return saved;
+    return Object.assign(saved, { nextLevel, completed });
+  });
 }
 
 async function verifySubmission(
@@ -307,6 +344,7 @@ export async function reviewSubmission(
     const updated = await tx.query<CodingSubmissionRow>(
       `update coding_submissions
           set status = $2,
+              review_state = $5,
               verified_at = $3,
               verified_solved_at = $3,
               verdict = $4
@@ -316,6 +354,7 @@ export async function reviewSubmission(
         decision === "APPROVED" ? "VERIFIED" : "REJECTED",
         decision === "APPROVED" ? now : null,
         decision === "APPROVED" ? "Accepted (manual review)" : "Rejected (manual review)",
+        decision === "APPROVED" ? "REVIEWED_VALID" : "REVIEWED_INVALID",
       ],
     );
 
@@ -349,3 +388,77 @@ export async function reviewSubmission(
     return updated.rows[0]!;
   });
 }
+
+/**
+ * Update the admin-side review state for a submission without changing its
+ * PENDING_REVIEW/VERIFIED/REJECTED status. This allows admins to mark
+ * submissions as reviewed, flagged, etc. without blocking student progression.
+ */
+export async function setSubmissionReviewState(
+  adminId: string,
+  input: AdminReviewStateInput,
+  ctx: ReviewContext = {},
+): Promise<CodingSubmissionRow> {
+  const db = ctx.db ?? getDb();
+  const result = await db.query<CodingSubmissionRow>(
+    `update coding_submissions
+        set review_state = $2
+      where id = $1
+      returning *`,
+    [input.submissionId, input.reviewState],
+  );
+  if (!result.rows[0]) throw errors.notFound("Submission not found.");
+
+  await writeAudit(
+    {
+      actorType: "ADMIN",
+      actorId: adminId,
+      action: "submission.review_state",
+      entityType: "coding_submission",
+      entityId: input.submissionId,
+      metadata: { reviewState: input.reviewState, notes: input.notes },
+      ip: ctx.ip,
+    },
+    db,
+  );
+
+  return result.rows[0];
+}
+
+/**
+ * Request source-code evidence from the student for a given submission.
+ * The admin can request code from any submission that doesn't already have source code.
+ */
+export async function requestSubmissionCode(
+  adminId: string,
+  submissionId: string,
+  ctx: ReviewContext = {},
+): Promise<CodingSubmissionRow> {
+  const db = ctx.db ?? getDb();
+  const result = await db.query<CodingSubmissionRow>(
+    `update coding_submissions
+        set code_requested = true
+      where id = $1
+      returning *`,
+    [submissionId],
+  );
+  if (!result.rows[0]) throw errors.notFound("Submission not found.");
+
+  await writeAudit(
+    {
+      actorType: "ADMIN",
+      actorId: adminId,
+      action: "submission.code_requested",
+      entityType: "coding_submission",
+      entityId: submissionId,
+      metadata: {},
+      ip: ctx.ip,
+    },
+    db,
+  );
+
+  return result.rows[0];
+}
+
+// Re-export for use in student profile queries
+export type { SubmissionReviewState };

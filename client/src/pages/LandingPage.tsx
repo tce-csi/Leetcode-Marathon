@@ -250,7 +250,7 @@ export default function LandingPage() {
         ) : null}
       </main>
 
-      <SiteFooter />
+      <SiteFooter showAdminLink />
     </div>
   );
 }

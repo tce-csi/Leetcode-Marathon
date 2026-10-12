@@ -29,7 +29,8 @@ authRoutes.post(
   asyncHandler(async (req, res) => {
     assertSameOrigin(req);
     const ip = getClientIp(req);
-    const limit = await checkRateLimit(`register:${ip}`, { limit: 10, windowSeconds: 300 });
+    // Allow up to 150 registrations per 5 minutes to accommodate concurrent participants sharing college lab / Wi-Fi IP
+    const limit = await checkRateLimit(`register:${ip}`, { limit: 150, windowSeconds: 300 });
     if (!limit.allowed) throw errors.tooManyRequests("Too many registration attempts. Try again later.");
 
     const body = registerSchema.parse(req.body);

@@ -1,7 +1,12 @@
 import { getDb } from "@/lib/db";
 import type { Db } from "@/lib/db/types";
 import { errors } from "@/lib/errors";
-import { getLevelContext, evaluateLevelCompletion } from "@/lib/services/progression";
+import {
+  getLevelContext,
+  evaluateLevelCompletion,
+  getNextLevel,
+  type RoadmapLevel,
+} from "@/lib/services/progression";
 import { awardPoints } from "@/lib/services/scoring";
 import type {
   AssessmentAttemptRow,
@@ -10,6 +15,7 @@ import type {
   LevelRow,
   QuestionPhase,
   QuestionType,
+  StudentLevelProgressRow,
   StudentRow,
 } from "@/lib/types";
 import type { AssessmentSubmitInput } from "@/lib/validation/assessment";
@@ -147,12 +153,23 @@ export async function getAssessmentState(
   level: LevelRow,
   db: Db = getDb(),
 ): Promise<AssessmentState> {
-  const phases: QuestionPhase[] =
+  const qPhases = await db.query<{ phase: QuestionPhase }>(
+    `select distinct phase from conceptual_questions where level_id = $1 and is_active = true`,
+    [level.id],
+  );
+  const activeQuestionPhases = new Set(qPhases.rows.map((r) => r.phase));
+
+  const configuredPhases: QuestionPhase[] =
     level.assessment_mode === "BOTH"
       ? ["BEFORE", "AFTER"]
       : level.assessment_mode === "NONE"
         ? []
         : [level.assessment_mode];
+
+  const phaseSet = new Set<QuestionPhase>([...configuredPhases, ...activeQuestionPhases]);
+  const phases: QuestionPhase[] = [];
+  if (phaseSet.has("BEFORE")) phases.push("BEFORE");
+  if (phaseSet.has("AFTER")) phases.push("AFTER");
 
   const phaseStates: PhaseState[] = [];
   let beforeSubmitted = false;
@@ -203,11 +220,14 @@ export async function getAssessmentState(
     });
   }
 
-  const requiresBefore = phaseAllowed(level.assessment_mode, "BEFORE");
+  const requiresBefore = phases.includes("BEFORE");
   const linkUnlocked = !requiresBefore || beforeSubmitted;
 
+  const effectiveMode: AssessmentMode =
+    phases.length === 2 ? "BOTH" : phases.length === 1 ? phases[0]! : level.assessment_mode;
+
   return {
-    mode: level.assessment_mode,
+    mode: effectiveMode,
     requirePass: level.require_assessment_pass,
     passingScore: level.passing_score,
     phases: phaseStates,
@@ -238,6 +258,8 @@ export interface SubmitResult {
   passed: boolean;
   requiresManualGrading: boolean;
   answers: GradedAnswer[];
+  nextLevel?: RoadmapLevel | null;
+  completed?: boolean;
 }
 
 export async function submitAssessment(
@@ -246,7 +268,12 @@ export async function submitAssessment(
   db: Db = getDb(),
 ): Promise<SubmitResult> {
   const { level } = await getLevelContext(student, input.levelId, db);
-  if (!phaseAllowed(level.assessment_mode, input.phase)) {
+  const qCountResult = await db.query<{ count: number }>(
+    `select count(*)::int as count from conceptual_questions where level_id = $1 and phase = $2 and is_active = true`,
+    [level.id, input.phase],
+  );
+  const hasQuestionsForPhase = (qCountResult.rows[0]?.count ?? 0) > 0;
+  if (!phaseAllowed(level.assessment_mode, input.phase) && !hasQuestionsForPhase) {
     throw errors.badRequest("This assessment phase is not enabled for this level.");
   }
 
@@ -374,6 +401,13 @@ export async function submitAssessment(
 
     await evaluateLevelCompletion(tx, student, level);
 
+    const progress = await tx.query<StudentLevelProgressRow>(
+      "select status from student_level_progress where student_id = $1 and level_id = $2",
+      [student.id, level.id],
+    );
+    const completed = progress.rows[0]?.status === "COMPLETED";
+    const nextLevel = completed ? await getNextLevel(tx, student.id, level) : null;
+
     return {
       attemptId,
       status,
@@ -383,6 +417,8 @@ export async function submitAssessment(
       passed,
       requiresManualGrading: requiresManual,
       answers: graded,
+      nextLevel,
+      completed,
     };
   });
 }

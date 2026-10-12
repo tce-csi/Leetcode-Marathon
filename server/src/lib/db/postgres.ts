@@ -25,9 +25,10 @@ class PostgresDb implements Db {
   readonly pool: Pool;
 
   constructor(connectionString: string) {
+    const maxPool = process.env.DB_POOL_MAX ? Number(process.env.DB_POOL_MAX) : 15;
     this.pool = new Pool({
       connectionString,
-      max: 5,
+      max: Number.isNaN(maxPool) || maxPool < 10 ? 15 : maxPool,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 15_000,
       ssl: buildSslConfig(connectionString),

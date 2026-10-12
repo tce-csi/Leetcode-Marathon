@@ -24,6 +24,8 @@ export type FlagKind =
   | "RAPID_LEVEL_COMPLETION"
   | "IDENTITY_CHANGED";
 
+export type FinalistStatus = "PROVISIONAL" | "UNDER_REVIEW" | "VERIFIED" | "DISQUALIFIED";
+
 export interface AdminUserRow {
   id: string;
   email: string;
@@ -145,6 +147,16 @@ export interface StudentRow {
   identity_verified_at: string | null;
   identity_verified_by: string | null;
   last_login_at: string | null;
+  contest_started_at: string | null;
+  finished_at: string | null;
+  elapsed_duration_ms: number | null;
+  previous_finished_at?: string | null;
+  previous_elapsed_duration_ms?: number | null;
+  finalist_status: FinalistStatus;
+  finalist_verified_at: string | null;
+  finalist_verified_by: string | null;
+  finalist_review_notes: string | null;
+  finalist_disqualification_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -169,6 +181,8 @@ export interface AssessmentAttemptRow {
   updated_at: string;
 }
 
+export type SubmissionReviewState = "NOT_REVIEWED" | "REVIEWED_VALID" | "REVIEWED_INVALID" | "FLAGGED";
+
 export interface CodingSubmissionRow {
   id: string;
   student_id: string;
@@ -184,6 +198,12 @@ export interface CodingSubmissionRow {
   reported_solved_at: string | null;
   verified_solved_at: string | null;
   verified_at: string | null;
+  attempt_number: number;
+  source_code: string | null;
+  programming_language: string | null;
+  code_file_name: string | null;
+  code_requested: boolean;
+  review_state: SubmissionReviewState;
   created_at: string;
   updated_at: string;
 }
@@ -196,6 +216,7 @@ export interface StudentLevelProgressRow {
   points_awarded: number;
   unlocked_at: string | null;
   completed_at: string | null;
+  challenge_opened_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -253,4 +274,53 @@ export interface SuspiciousFlagRow {
   created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+}
+
+export interface LevelSubmissionHistory {
+  level: LevelRow & { problem_title: string | null; problem_url: string | null };
+  progress: StudentLevelProgressRow | null;
+  submissions: CodingSubmissionRow[];
+}
+
+export interface StudentProfile {
+  student: PublicStudent;
+  levelsCompleted: number;
+  totalPoints: number;
+  lastActivity: string | null;
+  firstSubmissionAt: string | null;
+  contestCompletedAt: string | null;
+  totalLevels: number;
+  history: LevelSubmissionHistory[];
+}
+
+export interface FinisherEntry {
+  rank: number;
+  studentId: string;
+  fullName: string;
+  rollNumber: string;
+  year: Year;
+  leetcodeUsername: string;
+  leetcodeProfileUrl: string;
+  completedLevels: number;
+  totalLevels: number;
+  contestStartedAt: string | null;
+  finishedAt: string;
+  elapsedDurationMs: number;
+  elapsedFormatted: string;
+  finalistStatus: FinalistStatus;
+  finalistVerifiedAt: string | null;
+  finalistVerifiedBy: string | null;
+  finalistReviewNotes: string | null;
+  finalistDisqualificationReason: string | null;
+  totalPoints: number;
+}
+
+export interface FinisherStats {
+  totalRegistered: number;
+  currentlyParticipating: number;
+  totalFinished: number;
+  earliestFinish: string | null;
+  fastestElapsedMs: number | null;
+  fastestElapsedFormatted: string | null;
+  verifiedFinalists: number;
 }

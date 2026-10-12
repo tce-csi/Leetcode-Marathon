@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  ClipboardCheck,
   Flag,
   LayoutDashboard,
   ListChecks,
@@ -9,6 +8,7 @@ import {
   Menu,
   ScrollText,
   Settings,
+  Trophy,
   Users,
   X,
 } from "lucide-react";
@@ -22,9 +22,9 @@ import { cn, getInitials } from "@/lib/utils";
 const NAV = [
   { href: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { href: "/admin/levels", label: "Levels", icon: ListChecks },
-  { href: "/admin/reviews", label: "Reviews", icon: ClipboardCheck },
-  { href: "/admin/flags", label: "Flags", icon: Flag },
   { href: "/admin/students", label: "Students", icon: Users },
+  { href: "/admin/finishers", label: "Finishers", icon: Trophy },
+  { href: "/admin/flags", label: "Flags", icon: Flag },
   { href: "/admin/settings", label: "Settings", icon: Settings },
   { href: "/admin/audit", label: "Audit log", icon: ScrollText },
 ];

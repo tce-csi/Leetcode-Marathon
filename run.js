@@ -36,6 +36,14 @@ if (!existsSync(clientEnv) && existsSync(clientEnvExample)) {
   copyFileSync(clientEnvExample, clientEnv);
 }
 
+// 2. Ensure database migrations are applied
+try {
+  console.log(`${CYAN}[database] Checking and applying database migrations...${RESET}`);
+  execSync('npm run db:migrate', { cwd: __dirname, stdio: 'inherit' });
+} catch {
+  console.log(`${YELLOW}[warning] Database migration check encountered an issue.${RESET}`);
+}
+
 console.log(`${GREEN}✔${RESET} Client App:    ${BOLD}http://localhost:5173${RESET}`);
 console.log(`${GREEN}✔${RESET} Server API:    ${BOLD}http://localhost:5050${RESET}`);
 console.log(`${GREEN}✔${RESET} Admin Login:   ${BOLD}http://localhost:5173/admin/login${RESET}`);

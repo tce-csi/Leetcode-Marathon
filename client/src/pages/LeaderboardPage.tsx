@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Lock, Medal, Trophy } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Card } from "@/components/ui/card";
@@ -14,29 +15,25 @@ type YearKey = "1" | "2";
 
 export default function LeaderboardPage() {
   const [year, setYear] = useState<YearKey>("1");
-  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (target: YearKey) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const { entries: rows } = await api.get<{ entries: LeaderboardEntry[] }>(
-        `/api/leaderboard?year=${target}`,
-      );
-      setEntries(rows);
-    } catch (err) {
-      setEntries([]);
-      setError(isApiError(err) ? err.message : "Unable to load the leaderboard.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const {
+    data: entries = [],
+    isLoading: loading,
+    error: queryError,
+  } = useQuery<LeaderboardEntry[]>({
+    queryKey: ["leaderboard", year],
+    queryFn: async () => {
+      const res = await api.get<{ entries: LeaderboardEntry[] }>(`/api/leaderboard?year=${year}`);
+      return res.entries;
+    },
+    refetchInterval: 12000,
+  });
 
-  useEffect(() => {
-    load(year);
-  }, [year, load]);
+  const error = queryError
+    ? isApiError(queryError)
+      ? queryError.message
+      : "Unable to load the leaderboard."
+    : null;
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -47,7 +44,9 @@ export default function LeaderboardPage() {
             <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl">
               <Trophy className="size-6" /> Leaderboard
             </h1>
-            <p className="mt-1 text-sm text-muted">Rankings by points, levels and time.</p>
+            <p className="mt-1 text-sm text-muted">
+              Provisional marathon progression and official verified scores.
+            </p>
           </div>
           <Tabs
             className="sm:w-64"
@@ -72,18 +71,18 @@ export default function LeaderboardPage() {
           />
         ) : (
           <Card className="overflow-hidden">
-            <div className="grid grid-cols-[2.5rem_1fr_3.5rem_3.5rem] gap-3 border-b border-border bg-surface-2/60 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted sm:grid-cols-[3rem_1fr_4rem_4rem]">
+            <div className="grid grid-cols-[2.5rem_1fr_4rem_4.5rem] gap-3 border-b border-border bg-surface-2/60 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted sm:grid-cols-[3rem_1fr_5rem_5.5rem]">
               <span>Rank</span>
               <span>Participant</span>
               <span className="text-right">Levels</span>
-              <span className="text-right">Score</span>
+              <span className="text-right">Verified Pts</span>
             </div>
             <ul className="divide-y divide-border">
               {entries.map((entry) => (
                 <li
                   key={entry.studentId}
                   className={cn(
-                    "grid grid-cols-[2.5rem_1fr_3.5rem_3.5rem] items-center gap-3 px-4 py-3 text-sm sm:grid-cols-[3rem_1fr_4rem_4rem]",
+                    "grid grid-cols-[2.5rem_1fr_4rem_4.5rem] items-center gap-3 px-4 py-3 text-sm sm:grid-cols-[3rem_1fr_5rem_5.5rem]",
                     entry.isCurrentStudent && "bg-surface-2",
                   )}
                 >

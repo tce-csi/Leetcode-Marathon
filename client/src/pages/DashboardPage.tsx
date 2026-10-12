@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
@@ -16,10 +15,12 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { difficultyMeta, formatDate, progressMeta, yearLabel } from "@/lib/format";
+import { difficultyMeta, formatDate, formatISTTime, progressMeta, yearLabel } from "@/lib/format";
 import type { ProgressSummary } from "@/lib/services/progression";
 import type { ContestStatus } from "@/lib/services/contest";
 import type { PublicStudent, RoadmapLevel } from "@/lib/types";
+
+import { useQuery } from "@tanstack/react-query";
 
 interface RoadmapResponse {
   student: PublicStudent;
@@ -32,24 +33,20 @@ interface RoadmapResponse {
 function statusBadge(level: RoadmapLevel): { label: string; className: string } {
   if (level.status === "COMPLETED") return { label: "Completed", className: progressMeta.COMPLETED.className };
   if (level.submissionStatus === "PENDING_REVIEW") {
-    return { label: "Pending", className: progressMeta.IN_PROGRESS.className };
+    return { label: "Attempt Recorded", className: progressMeta.IN_PROGRESS.className };
   }
   if (level.status === "LOCKED") return { label: "Locked", className: progressMeta.LOCKED.className };
   return { label: "Available", className: progressMeta.UNLOCKED.className };
 }
 
 export default function DashboardPage() {
-  const [data, setData] = useState<RoadmapResponse | null>(null);
-  const [failed, setFailed] = useState(false);
+  const { data, isError, isLoading } = useQuery<RoadmapResponse>({
+    queryKey: ["student", "roadmap"],
+    queryFn: () => api.get<RoadmapResponse>("/api/student/roadmap"),
+    refetchInterval: 12000,
+  });
 
-  useEffect(() => {
-    api
-      .get<RoadmapResponse>("/api/student/roadmap")
-      .then(setData)
-      .catch(() => setFailed(true));
-  }, []);
-
-  if (failed) {
+  if (isError) {
     return (
       <EmptyState
         title="We couldn't load your contest"
@@ -58,7 +55,7 @@ export default function DashboardPage() {
     );
   }
 
-  if (!data) return <PageLoader label="Loading your contest" />;
+  if (isLoading || !data) return <PageLoader label="Loading your contest" />;
 
   const { student, summary, levels, contest, status } = data;
 
@@ -122,15 +119,43 @@ export default function DashboardPage() {
       <section className="space-y-3">
         <h2 className="text-lg font-semibold tracking-tight">Your current challenge</h2>
         {allCompleted ? (
-          <Card className="border-foreground/30 p-6">
-            <div className="flex items-center gap-3">
-              <CheckCircle2 className="size-6" />
+          <Card className="border-foreground bg-surface-1 p-6 space-y-4">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 className="size-8 text-foreground shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-xl font-bold tracking-tight text-foreground">
+                    Marathon Completed!
+                  </h3>
+                  <p className="text-sm text-muted mt-0.5">
+                    All assigned challenges have been reported successfully.
+                  </p>
+                </div>
+              </div>
+              <Badge variant="neutral" className="w-fit text-xs font-mono">
+                {summary.levelsCompleted} / {summary.totalLevels} Challenges Completed
+              </Badge>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-surface-2/60 p-4 sm:grid-cols-2 text-xs">
               <div>
-                <p className="font-semibold">All levels completed</p>
-                <p className="text-sm text-muted">
-                  Great work — you've finished every challenge in your track.
+                <p className="text-muted font-medium">Finished At (IST)</p>
+                <p className="font-mono text-base font-bold text-foreground mt-0.5">
+                  {summary.finishedAt ? formatISTTime(summary.finishedAt) : "Recorded"}
                 </p>
               </div>
+              <div>
+                <p className="text-muted font-medium">Total Time Taken</p>
+                <p className="font-mono text-base font-bold text-foreground mt-0.5">
+                  {summary.elapsedFormatted ?? "—"}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border bg-surface-2/30 p-3 text-xs text-muted-strong">
+              <p>
+                <strong>Notice:</strong> Your contest completion has been recorded. Official results and prizes are subject to organizer verification of submitted source code and LeetCode submissions.
+              </p>
             </div>
           </Card>
         ) : currentLevel ? (

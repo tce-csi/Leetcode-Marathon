@@ -30,9 +30,12 @@ export interface AdminStats {
   secondYear: number;
   activeStudents: number;
   participants: number;
+  totalFinishers: number;
+  pendingFinalists: number;
+  verifiedFinalists: number;
+  flaggedParticipants: number;
   totalSubmissions: number;
   verifiedSubmissions: number;
-  pendingReviews: number;
   completedLevels: number;
   totalLevels: number;
   completionRate: number;
@@ -48,9 +51,12 @@ export async function getDashboardStats(
     second_year: number;
     active_students: number;
     participants: number;
+    total_finishers: number;
+    pending_finalists: number;
+    verified_finalists: number;
+    flagged_participants: number;
     total_submissions: number;
     verified_submissions: number;
-    pending_reviews: number;
     completed_levels: number;
     total_levels: number;
   }>(
@@ -61,9 +67,12 @@ export async function getDashboardStats(
        (select count(*) from students where contest_id = $1 and is_active = true)::int as active_students,
        (select count(*) from students s where s.contest_id = $1
           and exists (select 1 from score_events se where se.student_id = s.id))::int as participants,
+       (select count(*) from students where contest_id = $1 and finished_at is not null)::int as total_finishers,
+       (select count(*) from students where contest_id = $1 and finished_at is not null and finalist_status in ('PROVISIONAL', 'UNDER_REVIEW'))::int as pending_finalists,
+       (select count(*) from students where contest_id = $1 and finalist_status = 'VERIFIED')::int as verified_finalists,
+       (select count(distinct student_id) from suspicious_flags where contest_id = $1 and resolved_at is null)::int as flagged_participants,
        (select count(*) from coding_submissions cs join students s on s.id = cs.student_id where s.contest_id = $1)::int as total_submissions,
        (select count(*) from coding_submissions cs join students s on s.id = cs.student_id where s.contest_id = $1 and cs.status = 'VERIFIED')::int as verified_submissions,
-       (select count(*) from coding_submissions cs join students s on s.id = cs.student_id where s.contest_id = $1 and cs.status = 'PENDING_REVIEW')::int as pending_reviews,
        (select count(*) from student_level_progress p join students s on s.id = p.student_id where s.contest_id = $1 and p.status = 'COMPLETED')::int as completed_levels,
        (select count(*) from levels l join contest_tracks t on t.id = l.track_id where t.contest_id = $1 and l.is_active = true)::int as total_levels`,
     [contestId],
@@ -76,9 +85,12 @@ export async function getDashboardStats(
     secondYear: row.second_year,
     activeStudents: row.active_students,
     participants: row.participants,
+    totalFinishers: row.total_finishers,
+    pendingFinalists: row.pending_finalists,
+    verifiedFinalists: row.verified_finalists,
+    flaggedParticipants: row.flagged_participants,
     totalSubmissions: row.total_submissions,
     verifiedSubmissions: row.verified_submissions,
-    pendingReviews: row.pending_reviews,
     completedLevels: row.completed_levels,
     totalLevels: row.total_levels,
     completionRate: denominator === 0 ? 0 : Math.round((row.completed_levels / denominator) * 100),
@@ -209,6 +221,18 @@ export async function createLevel(
       throw error;
     }
     if (input.problem) await upsertProblem(tx, level.id, input.problem);
+
+    // Initialize progress record for all existing students in this track so dynamic levels appear seamlessly
+    await tx.query(
+      `insert into student_level_progress (student_id, level_id, status)
+       select s.id, $1, case when $3 = true then 'UNLOCKED' else 'LOCKED' end
+         from students s
+         join contest_tracks ct on ct.contest_id = s.contest_id and ct.year = s.year
+        where ct.id = $2
+       on conflict (student_id, level_id) do nothing`,
+      [level.id, input.trackId, Boolean(input.isStarting)],
+    );
+
     await writeAudit(
       { actorType: "ADMIN", actorId: adminId, action: "level.create", entityType: "level", entityId: level.id },
       tx,

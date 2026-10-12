@@ -5,6 +5,7 @@ import { getStudentSession } from "@/lib/auth/session";
 import { getDb } from "@/lib/db";
 import { errors } from "@/lib/errors";
 import { asyncHandler, ok } from "@/lib/http";
+import { getClientIp } from "@/lib/request";
 import {
   getAssessmentState,
   getAttemptsForStudent,
@@ -119,6 +120,14 @@ studentRoutes.get(
     const assessment = await getAssessmentState(student, level, db);
     const attempts = await getAttemptsForStudent(student.id, level.id, db);
 
+    // Record when the student first opens/views the challenge
+    if (!progress.challenge_opened_at) {
+      await db.query(
+        `update student_level_progress set challenge_opened_at = now() where id = $1`,
+        [progress.id],
+      );
+    }
+
     const submissionResult = await db.query<CodingSubmissionRow>(
       `select * from coding_submissions
         where student_id = $1 and level_id = $2
@@ -126,10 +135,17 @@ studentRoutes.get(
       [student.id, level.id],
     );
 
+    const totalLevelsResult = await db.query<{ count: number }>(
+      `select count(id)::int as count from levels where track_id = $1 and is_active = true`,
+      [level.track_id],
+    );
+    const totalLevels = totalLevelsResult.rows[0]?.count ?? 10;
+
     ok(res, {
       level: {
         id: level.id,
         levelNumber: level.level_number,
+        totalLevels,
         title: level.title,
         description: level.description,
         teaser: level.teaser,
@@ -142,6 +158,7 @@ studentRoutes.get(
         maxAttempts: level.max_attempts,
         status: progress.status,
       },
+      totalLevels,
       problem: problem
         ? { title: problem.title, url: problem.url, slug: problem.problem_slug }
         : null,
@@ -183,7 +200,17 @@ studentRoutes.post(
     if (!student) throw errors.unauthorized();
     const body = assessmentSubmitSchema.parse(req.body);
     const result = await submitAssessment(student, body, db);
-    ok(res, result);
+    const [levels, summary] = await Promise.all([
+      getStudentLevels(student, db),
+      getProgressSummary(db, student),
+    ]);
+    ok(res, {
+      ...result,
+      nextLevel: result.nextLevel ?? null,
+      completed: result.completed ?? false,
+      levels,
+      summary,
+    });
   }),
 );
 
@@ -206,8 +233,18 @@ studentRoutes.post(
     const student = await getStudentById(db, session.student.id);
     if (!student) throw errors.unauthorized();
     const body = submissionSchema.parse(req.body);
-    const submission = await createSubmission(student, body, { db });
-    ok(res, { submission });
+    const submission = await createSubmission(student, body, { db, ip: getClientIp(req) });
+    const [levels, summary] = await Promise.all([
+      getStudentLevels(student, db),
+      getProgressSummary(db, student),
+    ]);
+    ok(res, {
+      submission,
+      nextLevel: submission.nextLevel ?? null,
+      completed: submission.completed ?? true,
+      levels,
+      summary,
+    });
   }),
 );
 

@@ -7,4 +7,6 @@ export interface StudentListRow extends PublicStudent {
   total_points: number;
   levels_completed: number;
   pending_reviews: number;
+  total_levels: number;
 }
+

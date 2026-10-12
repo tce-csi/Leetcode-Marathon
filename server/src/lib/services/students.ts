@@ -19,6 +19,10 @@ import { initializeStudentProgress } from "@/lib/services/progression";
 import type { PublicStudent, StudentRow, Year } from "@/lib/types";
 import type { RegisterInput } from "@/lib/validation/auth";
 
+// Re-export the profile function from the dedicated module
+export { getStudentProfile } from "@/lib/services/student-profile";
+export type { StudentProfile, LevelSubmissionHistory } from "@/lib/services/student-profile";
+
 export interface ServiceContext {
   db?: Db;
   ip?: string | null;
@@ -196,6 +200,7 @@ export interface StudentListRow extends PublicStudent {
   total_points: number;
   levels_completed: number;
   pending_reviews: number;
+  total_levels: number;
 }
 
 export async function listStudents(
@@ -223,7 +228,13 @@ export async function listStudents(
     `select s.*,
             coalesce((select sum(se.points) from score_events se where se.student_id = s.id), 0)::int as total_points,
             coalesce((select count(*) from student_level_progress p where p.student_id = s.id and p.status = 'COMPLETED'), 0)::int as levels_completed,
-            coalesce((select count(*) from coding_submissions cs where cs.student_id = s.id and cs.status = 'PENDING_REVIEW'), 0)::int as pending_reviews
+            coalesce((select count(*) from coding_submissions cs where cs.student_id = s.id and cs.status = 'PENDING_REVIEW'), 0)::int as pending_reviews,
+            coalesce((
+              select count(l.id)::int
+                from levels l
+                join contest_tracks ct on ct.id = l.track_id
+               where ct.contest_id = s.contest_id and ct.year = s.year and ct.is_active = true and l.is_active = true
+            ), 0)::int as total_levels
        from students s
       where ${clauses.join(" and ")}
       order by total_points desc, s.created_at asc`,

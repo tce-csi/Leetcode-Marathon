@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { BadgeCheck, Download, Search, Settings2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { BadgeCheck, Download, ExternalLink, Eye, Search, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -112,8 +113,22 @@ export default function AdminStudentsPage() {
               {students.map((student) => (
                 <tr key={student.id} className="hover:bg-surface-2/40">
                   <td className="px-4 py-3">
-                    <p className="font-medium">{student.full_name}</p>
-                    <p className="font-mono text-xs text-muted">{student.roll_number}</p>
+                    <p className="font-medium text-foreground">{student.full_name}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="font-mono text-xs text-muted">{student.roll_number}</span>
+                      {student.leetcode_profile_url && (
+                        <a
+                          href={student.leetcode_profile_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 font-mono text-[11px] text-muted hover:text-foreground"
+                          title="Open LeetCode profile"
+                        >
+                          @{student.leetcode_username}
+                          <ExternalLink className="size-2.5 opacity-60" />
+                        </a>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <Badge variant="info">{yearLabel(student.year)}</Badge>
@@ -126,12 +141,22 @@ export default function AdminStudentsPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-right font-semibold text-accent">{student.total_points}</td>
-                  <td className="px-4 py-3 text-right">{student.levels_completed}</td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="font-semibold">{student.levels_completed}/{student.total_levels || 10}</span>
+                      <div className="w-16 h-1.5 bg-surface-3 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-foreground transition-all duration-300"
+                          style={{ width: `${Math.min(100, (student.levels_completed / (student.total_levels || 1)) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-right">
                     {student.pending_reviews > 0 ? (
-                      <Badge variant="warning">{student.pending_reviews}</Badge>
+                      <Badge variant="warning">{student.pending_reviews} pending</Badge>
                     ) : (
-                      <span className="text-muted">0</span>
+                      <span className="text-muted text-xs">0</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -140,9 +165,16 @@ export default function AdminStudentsPage() {
                     </Badge>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <Button variant="ghost" size="sm" onClick={() => setActive(student)}>
-                      <Settings2 className="size-4" /> Manage
-                    </Button>
+                    <div className="flex items-center justify-end gap-2">
+                      <Link to={`/admin/students/${student.id}`}>
+                        <Button variant="secondary" size="sm" className="h-8 text-xs gap-1.5">
+                          <Eye className="size-3.5" /> Review
+                        </Button>
+                      </Link>
+                      <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setActive(student)}>
+                        <Settings2 className="size-3.5" />
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}

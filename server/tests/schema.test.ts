@@ -59,7 +59,7 @@ describe("database schema", () => {
     ).rejects.toThrow();
   });
 
-  it("prevents more than one active submission per student/level", async () => {
+  it("allows multiple submission attempts per student/level to preserve history", async () => {
     const { rows } = await test.db.query<{ id: string }>(
       "insert into contests (slug, name) values ('c2', 'Contest') returning id",
     );
@@ -80,26 +80,14 @@ describe("database schema", () => {
     const studentId = student.rows[0].id;
     const levelId = level.rows[0].id;
     await test.db.query(
-      "insert into coding_submissions (student_id, level_id, status) values ($1, $2, 'PENDING_REVIEW')",
+      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 1)",
       [studentId, levelId],
     );
-    await expect(
-      test.db.query(
-        "insert into coding_submissions (student_id, level_id, status) values ($1, $2, 'PENDING_REVIEW')",
-        [studentId, levelId],
-      ),
-    ).rejects.toThrow();
-    // A rejected submission allows a new one.
-    await test.db.query(
-      "update coding_submissions set status = 'REJECTED' where student_id = $1 and level_id = $2",
+    const second = await test.db.query(
+      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 2) returning id",
       [studentId, levelId],
     );
-    await expect(
-      test.db.query(
-        "insert into coding_submissions (student_id, level_id, status) values ($1, $2, 'PENDING_REVIEW')",
-        [studentId, levelId],
-      ),
-    ).resolves.toBeDefined();
+    expect(second.rows).toHaveLength(1);
   });
 
   it("enforces score event idempotency keys", async () => {

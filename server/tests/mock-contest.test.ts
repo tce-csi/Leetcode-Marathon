@@ -287,6 +287,8 @@ describe("Phase 4: Final Mock Contest Validation", () => {
       .send({
         levelId: y1Levels[0].id,
         submissionUrl: "https://leetcode.com/submissions/detail/100001/",
+        sourceCode: "class Solution { public int[] twoSum(int[] nums, int target) { return new int[]{0,1}; } }",
+        programmingLanguage: "java",
         note: "Used hash map in O(N) time and O(N) space.",
       })
       .expect(200);
@@ -294,13 +296,20 @@ describe("Phase 4: Final Mock Contest Validation", () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.data.submission.status).toBe("PENDING_REVIEW");
 
-    // Pending submission does NOT yet complete level or award points
+    // Reporting attempt records submission (PENDING_REVIEW), completes level 1 and unlocks level 2
     const checkRes = await request(app)
       .get(`/api/student/levels/${y1Levels[0].id}`)
       .set("Cookie", student1Cookies)
       .expect(200);
 
-    expect(checkRes.body.data.level.status).not.toBe("COMPLETED");
+    expect(checkRes.body.data.level.status).toBe("COMPLETED");
+
+    // Check that roadmap shows Level 2 already unlocked without waiting for admin approval
+    const roadmapRes = await request(app)
+      .get("/api/student/roadmap")
+      .set("Cookie", student1Cookies)
+      .expect(200);
+    expect(roadmapRes.body.data.levels[1].status).toBe("UNLOCKED");
   });
 
   it("Step 9: Admin logs in, reviews, and approves the submission", async () => {

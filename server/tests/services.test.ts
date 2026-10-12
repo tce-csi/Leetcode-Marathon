@@ -211,7 +211,7 @@ describe("conceptual assessment", () => {
 });
 
 describe("submission review and unlocking", () => {
-  it("keeps a manual submission pending without unlocking the next level", async () => {
+  it("records a manual submission and unlocks the next level without awarding verified points", async () => {
     const { student } = await authenticateStudent("CS/01", "secret123", { db });
     const studentEntity = await studentRow(student.id);
 
@@ -220,14 +220,19 @@ describe("submission review and unlocking", () => {
       {
         levelId: level1,
         submissionUrl: "https://leetcode.com/problems/two-sum/submissions/1/",
+        sourceCode: "def solution(): pass",
       },
       { db },
     );
     expect(submission.status).toBe("PENDING_REVIEW");
 
     const levels = await getStudentLevels(studentEntity, db);
-    expect(levels[0]!.status).not.toBe("COMPLETED");
-    expect(levels[1]!.status).toBe("LOCKED");
+    expect(levels[0]!.status).toBe("COMPLETED");
+    expect(levels[1]!.status).toBe("UNLOCKED");
+
+    // Verified level points are NOT yet awarded for pending submission (only the 1pt from conceptual assessment)
+    const summary = await getProgressSummary(db, studentEntity);
+    expect(summary.totalPoints).toBe(1);
   });
 
   it("approves a submission, completes the level and unlocks the next", async () => {
@@ -264,14 +269,24 @@ describe("submission review and unlocking", () => {
     const studentEntity = await studentRow(student.id);
     const first = await createSubmission(
       studentEntity,
-      { levelId: level1, note: "attempt 1" },
+      {
+        levelId: level1,
+        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/101/",
+        sourceCode: "def solution(): pass",
+        note: "attempt 1",
+      },
       { db },
     );
     await reviewSubmission(adminId, first.id, "REJECTED", "Not eligible", { db });
 
     const second = await createSubmission(
       studentEntity,
-      { levelId: level1, note: "attempt 2" },
+      {
+        levelId: level1,
+        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/102/",
+        sourceCode: "def solution(): pass",
+        note: "attempt 2",
+      },
       { db },
     );
     expect(second.status).toBe("PENDING_REVIEW");
