@@ -39,9 +39,11 @@ import {
   yearLabel,
 } from "@/lib/format";
 import type {
+  AssessmentAttemptRow,
   CodingSubmissionRow,
   FinalistStatus,
   LevelSubmissionHistory,
+  QuizAttemptHistory,
   StudentProfile,
   SubmissionReviewState,
 } from "@/lib/types";
@@ -66,6 +68,7 @@ export default function AdminStudentReviewProfilePage() {
       );
       return res.profile;
     },
+    refetchInterval: 10000,
     enabled: Boolean(studentId),
   });
 
@@ -420,9 +423,12 @@ function QuestionReviewCard({
   item: LevelSubmissionHistory;
   onUpdate: () => void;
 }) {
-  const { level, progress, submissions } = item;
+  const { level, progress, submissions, assessments } = item;
   const statusMeta = progress ? progressMeta[progress.status] : progressMeta.LOCKED;
   const diffMeta = difficultyMeta[level.difficulty];
+  // Submissions are returned oldest-first; the highest attempt number is the
+  // student's latest report and is highlighted for reviewers.
+  const latestAttemptNumber = submissions.reduce((max, s) => Math.max(max, s.attempt_number), 0);
 
   return (
     <Card className="border border-border bg-surface-1">
@@ -495,21 +501,185 @@ function QuestionReviewCard({
         ) : (
           <div className="space-y-3">
             {submissions.map((sub) => (
-              <AttemptItem key={sub.id} submission={sub} onUpdate={onUpdate} />
+              <AttemptItem
+                key={sub.id}
+                submission={sub}
+                onUpdate={onUpdate}
+                isLatest={sub.attempt_number === latestAttemptNumber}
+              />
             ))}
           </div>
         )}
+
+        {/* Conceptual quiz attempts (one immutable submission per phase) */}
+        {assessments.length > 0 ? (
+          <QuizAttemptSection assessments={assessments} onUpdate={onUpdate} />
+        ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+function QuizAttemptSection({
+  assessments,
+  onUpdate,
+}: {
+  assessments: QuizAttemptHistory[];
+  onUpdate: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-strong">
+        Conceptual quiz answers
+      </p>
+      <div className="space-y-3">
+        {assessments.map(({ attempt, answers }) => (
+          <QuizAttemptItem
+            key={attempt.id}
+            attempt={attempt}
+            answers={answers}
+            onUpdate={onUpdate}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function QuizAttemptItem({
+  attempt,
+  answers,
+  onUpdate,
+}: {
+  attempt: AssessmentAttemptRow;
+  answers: QuizAttemptHistory["answers"];
+  onUpdate: () => void;
+}) {
+  const [note, setNote] = useState(attempt.review_note ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const saveNote = async () => {
+    setSaving(true);
+    try {
+      await api.patch(`/api/admin/assessments/${attempt.id}/review`, {
+        note: note.trim() || null,
+      });
+      toast.success("Review note saved.");
+      onUpdate();
+    } catch (error) {
+      toast.error(isApiError(error) ? error.message : "Failed to save review note.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface-2/30 p-3.5">
+      {/* Attempt Top Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="rounded bg-surface-3 px-2 py-0.5 font-mono font-semibold text-foreground">
+            {attempt.phase} · Attempt #{attempt.attempt_number}
+          </span>
+          {attempt.is_submission ? (
+            <Badge className="gap-1 border-foreground bg-foreground/5 text-foreground">
+              <ShieldCheck className="size-3" /> Locked submission
+            </Badge>
+          ) : null}
+          <span className="font-mono text-muted">
+            {formatIST(attempt.submitted_at ?? attempt.started_at)}
+          </span>
+        </div>
+        <span className="flex items-center gap-2">
+          <span className="font-mono text-muted">
+            {attempt.score}/{attempt.max_score}
+          </span>
+          <Badge
+            variant={
+              attempt.passed
+                ? "success"
+                : attempt.status === "GRADED"
+                  ? "danger"
+                  : "warning"
+            }
+          >
+            {attempt.status === "GRADED"
+              ? attempt.passed
+                ? "Passed"
+                : "Failed"
+              : attempt.status}
+          </Badge>
+        </span>
+      </div>
+
+      {/* Answers */}
+      <div className="space-y-2">
+        {answers.map((answer) => (
+          <div
+            key={answer.questionId}
+            className="rounded-md border border-border/70 bg-surface-1/50 p-2.5 text-xs"
+          >
+            <p className="flex flex-wrap items-center gap-1.5 font-medium text-foreground">
+              {answer.questionText}
+              <span className="text-muted">({answer.pointsAwarded} pts)</span>
+              {answer.isCorrect === true ? (
+                <Badge variant="success">Correct</Badge>
+              ) : answer.isCorrect === null ? (
+                <Badge variant="neutral">Submitted for review</Badge>
+              ) : (
+                <Badge variant="danger">Incorrect</Badge>
+              )}
+            </p>
+            {answer.textAnswer ? (
+              <p className="mt-1.5 whitespace-pre-line rounded border border-border bg-surface-2/60 px-2.5 py-1.5 text-muted-strong">
+                {answer.textAnswer}
+              </p>
+            ) : null}
+            {answer.selectedOptions.length > 0 ? (
+              <p className="mt-1.5 text-muted">
+                Selected: {answer.selectedOptions.map((option) => option.text).join(", ")}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      {/* Reviewer note — recorded without modifying the student's answers */}
+      {attempt.is_submission ? (
+        <div className="space-y-2 border-t border-border/60 pt-3">
+          <label className="text-xs font-medium text-muted-strong">
+            Reviewer note (does not alter answers)
+          </label>
+          <Textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Optional note for the judges…"
+            className="min-h-20"
+          />
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={saveNote} loading={saving}>
+              Save note
+            </Button>
+            {attempt.reviewed_at ? (
+              <span className="text-[11px] text-muted">
+                Reviewed {formatIST(attempt.reviewed_at)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 function AttemptItem({
   submission,
   onUpdate,
+  isLatest,
 }: {
   submission: CodingSubmissionRow;
   onUpdate: () => void;
+  isLatest?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -599,6 +769,11 @@ function AttemptItem({
           <span className="font-semibold font-mono bg-surface-3 px-2 py-0.5 rounded text-foreground">
             Attempt #{submission.attempt_number || 1}
           </span>
+          {isLatest ? (
+            <Badge className="border-foreground bg-foreground/5 text-foreground gap-1">
+              <ShieldCheck className="size-3" /> Latest
+            </Badge>
+          ) : null}
           <span className="font-mono text-muted">{formatIST(submission.created_at)}</span>
         </div>
 

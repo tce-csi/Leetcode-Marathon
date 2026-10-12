@@ -1,20 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ChevronDown, Code2, ExternalLink, LogOut, Menu, Trophy, X } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { ChevronDown, Code2, ExternalLink, LogOut, Menu, X } from "lucide-react";
 import { CsiBrand, Logo } from "@/components/brand";
 import { useSession } from "@/components/session-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { cn, getInitials } from "@/lib/utils";
-
-const NAV = [
-  { href: "/dashboard", label: "Contest", icon: <Code2 className="size-4" /> },
-  { href: "/leaderboard", label: "Leaderboard", icon: <Trophy className="size-4" /> },
-];
+import { getInitials } from "@/lib/utils";
 
 export function SiteHeader() {
   const { student, loading, signOutStudent } = useSession();
-  const { pathname } = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -44,21 +38,13 @@ export function SiteHeader() {
         </div>
 
         <nav className="hidden items-center gap-1 md:flex">
-          {NAV.map((item) => (
-            <Link
-              key={item.href}
-              to={item.href}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                pathname.startsWith(item.href)
-                  ? "bg-surface-2 text-foreground"
-                  : "text-muted-strong hover:bg-surface-2 hover:text-foreground",
-              )}
-            >
-              {item.icon}
-              {item.label}
-            </Link>
-          ))}
+          <Link
+            to="/dashboard"
+            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted-strong transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            <Code2 className="size-4" />
+            Contest
+          </Link>
         </nav>
 
         <div className="flex items-center gap-2">
@@ -154,22 +140,6 @@ export function SiteHeader() {
       {open ? (
         <div className="border-t border-border bg-surface px-4 py-3 md:hidden">
           <div className="flex flex-col gap-1">
-            {NAV.map((item) => (
-              <Link
-                key={item.href}
-                to={item.href}
-                onClick={() => setOpen(false)}
-                className={cn(
-                  "flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium",
-                  pathname.startsWith(item.href)
-                    ? "bg-surface-2 text-foreground"
-                    : "text-muted-strong hover:bg-surface-2",
-                )}
-              >
-                {item.icon}
-                {item.label}
-              </Link>
-            ))}
             <div className="mt-2 flex items-center gap-2 border-t border-border pt-3">
               {student ? (
                 <>

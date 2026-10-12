@@ -12,6 +12,7 @@ import { RadioGroup } from "@/components/ui/controls";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { formatDate, yearLabel } from "@/lib/format";
 import type { AdminLevelRow } from "@/lib/services/admin";
 import type { StudentListRow } from "@/lib/services/students";
@@ -47,6 +48,23 @@ export default function AdminStudentsPage() {
     const timer = setTimeout(load, search ? 300 : 0);
     return () => clearTimeout(timer);
   }, [load, search]);
+
+  // Silent background refresh so polled updates never flash the loading state.
+  const refresh = useCallback(async () => {
+    try {
+      const params = new URLSearchParams();
+      if (search.trim()) params.set("search", search.trim());
+      if (year) params.set("year", year);
+      const { students: rows } = await api.get<{ students: StudentListRow[] }>(
+        `/api/admin/students?${params.toString()}`,
+      );
+      setStudents(rows);
+    } catch {
+      // transient background failures keep the last good data
+    }
+  }, [search, year]);
+
+  useAutoRefresh(refresh, 8000);
 
   useEffect(() => {
     api
@@ -143,7 +161,7 @@ export default function AdminStudentsPage() {
                   <td className="px-4 py-3 text-right font-semibold text-accent">{student.total_points}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex flex-col items-end gap-1">
-                      <span className="font-semibold">{student.levels_completed}/{student.total_levels || 10}</span>
+                      <span className="font-semibold">{student.levels_completed}/{student.total_levels}</span>
                       <div className="w-16 h-1.5 bg-surface-3 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-foreground transition-all duration-300"

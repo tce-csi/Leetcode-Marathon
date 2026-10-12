@@ -91,6 +91,8 @@ export interface LevelRow {
   passing_score: number;
   max_attempts: number;
   require_verified_submission: boolean;
+  archived_at: string | null;
+  archived_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -147,9 +149,13 @@ export interface StudentRow {
   identity_verified_at: string | null;
   identity_verified_by: string | null;
   last_login_at: string | null;
+  /** Set once the student presses "Start Contest" (anchors the personal timer). */
+  started_at: string | null;
   contest_started_at: string | null;
   finished_at: string | null;
   elapsed_duration_ms: number | null;
+  /** Set once the student explicitly submits the contest for organiser review. */
+  finalized_at: string | null;
   previous_finished_at?: string | null;
   previous_elapsed_duration_ms?: number | null;
   finalist_status: FinalistStatus;
@@ -173,6 +179,11 @@ export interface AssessmentAttemptRow {
   score: number;
   max_score: number;
   passed: boolean;
+  /** Whether this attempt is the permanent one-submission for the (student, level, phase). */
+  is_submission: boolean;
+  review_note: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
   started_at: string;
   submitted_at: string | null;
   graded_at: string | null;
@@ -190,6 +201,8 @@ export interface CodingSubmissionRow {
   problem_id: string | null;
   status: SubmissionStatus;
   verification_source: VerificationSourceKind;
+  /** Whether this submission currently holds the one-submission slot for the level. */
+  is_official: boolean;
   submission_url: string | null;
   screenshot_path: string | null;
   student_note: string | null;
@@ -276,10 +289,28 @@ export interface SuspiciousFlagRow {
   resolved_by: string | null;
 }
 
+export interface QuizAnswerHistory {
+  questionId: string;
+  questionText: string;
+  questionType: QuestionType;
+  phase: QuestionPhase;
+  isCorrect: boolean | null;
+  pointsAwarded: number;
+  selectedOptionIds: string[];
+  selectedOptions: { id: string; text: string }[];
+  textAnswer: string | null;
+}
+
+export interface QuizAttemptHistory {
+  attempt: AssessmentAttemptRow;
+  answers: QuizAnswerHistory[];
+}
+
 export interface LevelSubmissionHistory {
   level: LevelRow & { problem_title: string | null; problem_url: string | null };
   progress: StudentLevelProgressRow | null;
   submissions: CodingSubmissionRow[];
+  assessments: QuizAttemptHistory[];
 }
 
 export interface StudentProfile {
@@ -303,8 +334,12 @@ export interface FinisherEntry {
   leetcodeProfileUrl: string;
   completedLevels: number;
   totalLevels: number;
+  /** Personal contest start (falls back to the recorded contest start). */
+  startedAt: string | null;
   contestStartedAt: string | null;
   finishedAt: string;
+  /** Set once the student explicitly submitted the contest for review. */
+  finalizedAt: string | null;
   elapsedDurationMs: number;
   elapsedFormatted: string;
   finalistStatus: FinalistStatus;

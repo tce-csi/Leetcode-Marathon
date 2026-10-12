@@ -114,17 +114,21 @@ describe("login schemas", () => {
 describe("levelCreateSchema", () => {
   const base = {
     trackId: "11111111-1111-4111-8111-111111111111",
-    levelNumber: "1",
     title: "Two Sum",
   };
 
   it("applies defaults and coerces numbers", () => {
     const parsed = levelCreateSchema.parse(base);
-    expect(parsed.levelNumber).toBe(1);
     expect(parsed.points).toBe(10);
     expect(parsed.difficulty).toBe("EASY");
     expect(parsed.assessmentMode).toBe("NONE");
     expect(parsed.requireVerifiedSubmission).toBe(true);
+    expect(parsed.force).toBe(false);
+  });
+
+  it("ignores any client-supplied level number", () => {
+    const parsed = levelCreateSchema.parse({ ...base, levelNumber: 42 }) as Record<string, unknown>;
+    expect(parsed.levelNumber).toBeUndefined();
   });
 
   it("rejects a non-uuid track", () => {
@@ -185,10 +189,10 @@ describe("questionCreateSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("requires an expected answer for short text", () => {
+  it("accepts short text answers without requiring a reference answer", () => {
     expect(
       questionCreateSchema.safeParse({ ...base, questionType: "SHORT_TEXT" }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       questionCreateSchema.safeParse({
         ...base,
@@ -196,6 +200,29 @@ describe("questionCreateSchema", () => {
         correctText: "hash map",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts character bounds for short text answers", () => {
+    const result = questionCreateSchema.safeParse({
+      ...base,
+      questionType: "SHORT_TEXT",
+      minLength: 20,
+      maxLength: 500,
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.minLength).toBe(20);
+    expect(result.success && result.data.maxLength).toBe(500);
+  });
+
+  it("rejects inverted character bounds", () => {
+    expect(
+      questionCreateSchema.safeParse({
+        ...base,
+        questionType: "SHORT_TEXT",
+        minLength: 100,
+        maxLength: 10,
+      }).success,
+    ).toBe(false);
   });
 });
 

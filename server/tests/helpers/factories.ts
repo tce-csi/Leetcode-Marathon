@@ -6,6 +6,8 @@ export interface QuestionFactory {
   phase?: "BEFORE" | "AFTER";
   points?: number;
   correctText?: string | null;
+  minLength?: number | null;
+  maxLength?: number | null;
   options?: { text: string; correct?: boolean }[];
 }
 
@@ -88,8 +90,8 @@ export async function createLevelRecord(
   for (const [index, question] of (options.questions ?? []).entries()) {
     const inserted = await db.query<{ id: string }>(
       `insert into conceptual_questions
-         (level_id, question_text, question_type, phase, order_index, points, correct_text, explanation)
-       values ($1,$2,$3,$4,$5,$6,$7,'') returning id`,
+         (level_id, question_text, question_type, phase, order_index, points, correct_text, explanation, min_length, max_length)
+       values ($1,$2,$3,$4,$5,$6,$7,'',$8,$9) returning id`,
       [
         levelId,
         question.text,
@@ -98,6 +100,8 @@ export async function createLevelRecord(
         index,
         question.points ?? 1,
         question.correctText ?? null,
+        question.minLength ?? null,
+        question.maxLength ?? null,
       ],
     );
     const questionId = inserted.rows[0]!.id;

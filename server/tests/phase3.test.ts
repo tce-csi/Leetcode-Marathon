@@ -324,7 +324,7 @@ describe("suspicious activity flags", () => {
         { db },
       )
     ).student;
-    const url = "https://leetcode.com/problems/two-sum/submissions/999/";
+    const url = "https://leetcode.com/submissions/detail/999/";
 
     const subA = await createSubmission(
       await studentEntity(a.id),
@@ -364,7 +364,7 @@ describe("suspicious activity flags", () => {
       await studentEntity(student.id),
       {
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/777/",
+        submissionUrl: "https://leetcode.com/submissions/detail/777/",
         sourceCode: "def solution(): pass",
       },
       { db },
@@ -428,7 +428,7 @@ describe("suspicious activity flags", () => {
         { db },
       )
     ).student;
-    const url = "https://leetcode.com/problems/two-sum/submissions/222/";
+    const url = "https://leetcode.com/submissions/detail/222/";
     await createSubmission(
       await studentEntity(other.id),
       { levelId: level1, submissionUrl: url, sourceCode: "def solution(): pass" },
@@ -438,7 +438,7 @@ describe("suspicious activity flags", () => {
       await studentEntity(target.id),
       {
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/333/",
+        submissionUrl: "https://leetcode.com/submissions/detail/333/",
         sourceCode: "def solution(): pass",
       },
       { db },

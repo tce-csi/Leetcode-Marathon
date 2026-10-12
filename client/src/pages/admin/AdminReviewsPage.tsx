@@ -10,6 +10,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { Tabs } from "@/components/ui/tabs";
 import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { formatDate, submissionMeta, yearLabel } from "@/lib/format";
 import { toast } from "sonner";
 import type { SubmissionWithContext } from "@/lib/services/submissions";
@@ -49,6 +50,23 @@ export default function AdminReviewsPage() {
     const timer = setTimeout(load, search ? 300 : 0);
     return () => clearTimeout(timer);
   }, [load, search]);
+
+  // Silent background refresh so newly submitted work appears without a reload.
+  const refresh = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ status });
+      if (year) params.set("year", year);
+      if (search.trim()) params.set("search", search.trim());
+      const { submissions } = await api.get<{ submissions: ReviewItem[] }>(
+        `/api/admin/submissions?${params.toString()}`,
+      );
+      setItems(submissions);
+    } catch {
+      // transient background failures keep the last good data
+    }
+  }, [status, year, search]);
+
+  useAutoRefresh(refresh, 8000);
 
   const decide = async (decision: "APPROVED" | "REJECTED") => {
     if (!active) return;

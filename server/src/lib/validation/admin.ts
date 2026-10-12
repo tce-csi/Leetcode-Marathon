@@ -13,7 +13,9 @@ const phaseSchema = z.enum(["BEFORE", "AFTER"]);
 
 export const levelCreateSchema = z.object({
   trackId: z.string().uuid("Invalid track."),
-  levelNumber: z.coerce.number().int().min(1).max(500),
+  // Level numbers are assigned by the backend from the track's official order;
+  // any client-supplied value is intentionally ignored.
+  force: z.boolean().optional().default(false),
   title: z.string().trim().min(1, "Title is required.").max(200),
   description: z.string().trim().max(3000).optional().default(""),
   teaser: z.string().trim().max(500).optional().default(""),
@@ -40,7 +42,6 @@ export const levelCreateSchema = z.object({
 export const levelUpdateSchema = levelCreateSchema.partial().extend({
   id: z.string().uuid(),
   trackId: z.string().uuid().optional(),
-  levelNumber: z.coerce.number().int().min(1).max(500).optional(),
 });
 
 export const trackUpdateSchema = z.object({
@@ -66,6 +67,10 @@ export const questionCreateSchema = z
     explanation: z.string().trim().max(3000).optional().default(""),
     variantGroup: z.string().trim().max(100).optional().or(z.literal("")),
     isActive: z.boolean().optional().default(true),
+    // Optional character bounds for SHORT_TEXT questions. When absent the
+    // server-default bounds (1..4000) apply.
+    minLength: z.coerce.number().int().min(1).max(4000).optional(),
+    maxLength: z.coerce.number().int().min(1).max(4000).optional(),
     options: z
       .array(
         z.object({
@@ -90,31 +95,48 @@ export const questionCreateSchema = z
     },
   )
   .refine(
-    (value) => value.questionType !== "SHORT_TEXT" || value.correctText !== undefined,
-    { message: "Short-text questions should define an expected answer.", path: ["correctText"] },
+    (value) => {
+      if (value.minLength === undefined && value.maxLength === undefined) return true;
+      const min = value.minLength ?? 1;
+      const max = value.maxLength ?? 4000;
+      return min <= max;
+    },
+    { message: "Minimum length must not exceed the maximum length.", path: ["minLength"] },
   );
 
-export const questionUpdateSchema = z.object({
-  id: z.string().uuid(),
-  questionText: z.string().trim().min(1).max(3000).optional(),
-  questionType: questionTypeSchema.optional(),
-  phase: phaseSchema.optional(),
-  orderIndex: z.coerce.number().int().min(0).max(5000).optional(),
-  points: z.coerce.number().int().min(0).max(1000).optional(),
-  correctText: z.string().trim().max(1000).optional().or(z.literal("")),
-  explanation: z.string().trim().max(3000).optional(),
-  variantGroup: z.string().trim().max(100).optional().or(z.literal("")),
-  isActive: z.boolean().optional(),
-  options: z
-    .array(
-      z.object({
-        optionText: z.string().trim().min(1).max(1000),
-        isCorrect: z.boolean().optional().default(false),
-      }),
-    )
-    .max(20)
-    .optional(),
-});
+export const questionUpdateSchema = z
+  .object({
+    id: z.string().uuid(),
+    questionText: z.string().trim().min(1).max(3000).optional(),
+    questionType: questionTypeSchema.optional(),
+    phase: phaseSchema.optional(),
+    orderIndex: z.coerce.number().int().min(0).max(5000).optional(),
+    points: z.coerce.number().int().min(0).max(1000).optional(),
+    correctText: z.string().trim().max(1000).optional().or(z.literal("")),
+    explanation: z.string().trim().max(3000).optional(),
+    variantGroup: z.string().trim().max(100).optional().or(z.literal("")),
+    isActive: z.boolean().optional(),
+    minLength: z.coerce.number().int().min(1).max(4000).optional(),
+    maxLength: z.coerce.number().int().min(1).max(4000).optional(),
+    options: z
+      .array(
+        z.object({
+          optionText: z.string().trim().min(1).max(1000),
+          isCorrect: z.boolean().optional().default(false),
+        }),
+      )
+      .max(20)
+      .optional(),
+  })
+  .refine(
+    (value) => {
+      if (value.minLength === undefined && value.maxLength === undefined) return true;
+      const min = value.minLength ?? 1;
+      const max = value.maxLength ?? 4000;
+      return min <= max;
+    },
+    { message: "Minimum length must not exceed the maximum length.", path: ["minLength"] },
+  );
 
 export const contestUpdateSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),

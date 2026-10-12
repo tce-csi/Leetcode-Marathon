@@ -6,7 +6,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   FileImage,
-  RefreshCw,
+  Lock,
   Send,
   ShieldCheck,
   Trophy,
@@ -17,20 +17,30 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox, RadioGroup } from "@/components/ui/controls";
+import { Dialog } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { PageLoader } from "@/components/ui/feedback";
+import { FinalizeContestCard } from "@/components/finalize-contest-card";
 import { api, isApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { difficultyMeta, formatDate, progressMeta } from "@/lib/format";
-import type { AssessmentState, PhaseState, SubmitResult } from "@/lib/services/assessments";
-import type { ContestStatus } from "@/lib/services/contest";
-import type { ProgressSummary } from "@/lib/services/progression";
+import {
+  LEETCODE_SUBMISSION_URL_MESSAGE,
+  parseLeetcodeSubmissionDetailUrl,
+} from "@/lib/leetcode-url";
+import { difficultyMeta, formatDate, progressMeta, submissionMeta } from "@/lib/format";
 import type {
-  AssessmentAttemptRow,
+  AttemptDetail,
+  AssessmentState,
+  PhaseState,
+  SubmitResult,
+} from "@/lib/services/assessments";
+import type { ContestStatus } from "@/lib/services/contest";
+import type {
   CodingSubmissionRow,
   Difficulty,
   ProgressStatus,
+  QuestionPhase,
   RoadmapLevel,
 } from "@/lib/types";
 
@@ -56,37 +66,20 @@ interface LevelResponse {
     status: ProgressStatus;
   };
   totalLevels?: number;
+  nextLevel: RoadmapLevel | null;
   problem: { title: string; url: string; slug: string } | null;
   assessment: AssessmentState;
-  attempts: AssessmentAttemptRow[];
+  attempts: AttemptDetail[];
   submission: CodingSubmissionRow | null;
   contest: ContestStatus;
   screenshotStorageEnabled: boolean;
-}
-
-interface LevelPageData extends LevelResponse {
-  nextLevel: RoadmapLevel | null;
 }
 
 interface SubmissionResponse {
   submission: CodingSubmissionRow;
   nextLevel: RoadmapLevel | null;
   completed: boolean;
-  levels?: RoadmapLevel[];
-  summary?: ProgressSummary;
-}
-
-interface RoadmapResponse {
-  levels: RoadmapLevel[];
-  summary?: ProgressSummary;
-}
-
-function findNextLevel(levels: RoadmapLevel[] | null, currentId: string): RoadmapLevel | null {
-  if (!levels) return null;
-  const index = levels.findIndex((level) => level.id === currentId);
-  if (index === -1) return null;
-  const next = levels[index + 1];
-  return next && next.status !== "LOCKED" ? next : null;
+  totalLevels?: number;
 }
 
 export default function LevelPage() {
@@ -97,57 +90,63 @@ export default function LevelPage() {
     data,
     isLoading: loading,
     error: queryError,
-    refetch,
-  } = useQuery<LevelPageData>({
+  } = useQuery<LevelResponse>({
     queryKey: ["student", "level", levelId],
-    queryFn: async () => {
-      const [result, roadmap] = await Promise.all([
-        api.get<LevelResponse>(`/api/student/levels/${levelId}`),
-        api.get<RoadmapResponse>("/api/student/roadmap").catch(() => null),
-      ]);
-      return {
-        ...result,
-        nextLevel: findNextLevel(roadmap?.levels ?? null, levelId),
-      };
-    },
+    queryFn: () => api.get<LevelResponse>(`/api/student/levels/${levelId}`),
     refetchInterval: 12000,
     enabled: Boolean(levelId),
   });
 
   const load = useCallback(() => {
+    // Background-refresh every student-scoped query (level + roadmap + profile).
     queryClient.invalidateQueries({ queryKey: ["student"] });
-    refetch();
-  }, [refetch]);
+  }, []);
+
+  // Warms the cache for a level the student is now authorised to open, so the
+  // "Continue" click renders instantly instead of waiting on a network trip.
+  const prefetchLevel = useCallback((id: string) => {
+    void queryClient.prefetchQuery({
+      queryKey: ["student", "level", id],
+      queryFn: () => api.get<LevelResponse>(`/api/student/levels/${id}`),
+      staleTime: 15_000,
+    });
+  }, []);
+
+  // Applies the server's authoritative completion result to the local cache so
+  // the next-level banner appears immediately after a successful response.
+  const applyProgressUpdate = useCallback(
+    (completed: boolean, nextLevel: RoadmapLevel | null, totalLevels?: number) => {
+      queryClient.setQueryData<LevelResponse>(["student", "level", levelId], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          level: {
+            ...old.level,
+            status: completed ? "COMPLETED" : old.level.status,
+            totalLevels: totalLevels ?? old.totalLevels,
+          },
+          totalLevels: totalLevels ?? old.totalLevels,
+          nextLevel: nextLevel ?? old.nextLevel,
+        };
+      });
+    },
+    [levelId],
+  );
 
   const handleSubmissionSuccess = useCallback(
     (res: SubmissionResponse) => {
-      queryClient.setQueryData<LevelPageData>(["student", "level", levelId], (old) => {
+      queryClient.setQueryData<LevelResponse>(["student", "level", levelId], (old) => {
         if (!old) return old;
         return {
           ...old,
           submission: res.submission,
-          level: {
-            ...old.level,
-            status: "COMPLETED",
-          },
-          nextLevel: res.nextLevel ?? old.nextLevel,
         };
       });
-
-      if (res.levels || res.summary) {
-        queryClient.setQueryData<RoadmapResponse>(["student", "roadmap"], (old) => {
-          if (!old) return old;
-          return {
-            ...old,
-            levels: res.levels ?? old.levels,
-            summary: res.summary ?? old.summary,
-          };
-        });
-      }
-
-      queryClient.invalidateQueries({ queryKey: ["student", "roadmap"] });
+      applyProgressUpdate(res.completed, res.nextLevel, res.totalLevels);
+      if (res.nextLevel) prefetchLevel(res.nextLevel.id);
+      load();
     },
-    [levelId],
+    [levelId, applyProgressUpdate, load, prefetchLevel],
   );
 
   if (loading) return <PageLoader label="Loading challenge" />;
@@ -172,12 +171,18 @@ export default function LevelPage() {
   }
 
   const { level, problem, assessment, attempts, submission, screenshotStorageEnabled, nextLevel } = data;
-  const totalLevels = data.totalLevels ?? level.totalLevels ?? (nextLevel ? nextLevel.levelNumber : 10);
+  // Server always returns the true track total; fall back to the next/current
+  // level number rather than any hardcoded maximum.
+  const totalLevels =
+    data.totalLevels ?? level.totalLevels ?? (nextLevel ? nextLevel.levelNumber : level.levelNumber);
   const difficulty = difficultyMeta[level.difficulty];
   const status = progressMeta[level.status];
   const beforePhases = assessment.phases.filter((phase) => phase.phase === "BEFORE");
   const afterPhases = assessment.phases.filter((phase) => phase.phase === "AFTER");
   const isCompleted = level.status === "COMPLETED";
+  // The immutable one-submission attempt for a phase, when it exists.
+  const submissionDetailFor = (phase: QuestionPhase) =>
+    attempts.find((detail) => detail.attempt.phase === phase && detail.attempt.is_submission) ?? null;
 
   return (
     <div className="space-y-6">
@@ -225,14 +230,16 @@ export default function LevelPage() {
           key={phase.phase}
           phase={phase}
           levelId={level.id}
+          submittedDetail={submissionDetailFor("BEFORE")}
           onSubmitted={(result) => {
             toast[result.passed ? "success" : "warning"](
               result.passed
                 ? `Assessment passed with ${result.score}/${result.maxScore}.`
                 : result.requiresManualGrading
-                  ? "Submitted. Some answers need manual grading."
-                  : `Scored ${result.score}/${result.maxScore}. ${result.percent}% (needs ${level.passingScore}%).`,
+                  ? "Submitted. Your text answers will be reviewed by the organisers."
+                  : `Submit recorded. Scored ${result.score}/${result.maxScore} (${result.percent}%).`,
             );
+            applyProgressUpdate(result.completed ?? false, result.nextLevel ?? null, result.totalLevels);
             load();
           }}
         />
@@ -268,27 +275,19 @@ export default function LevelPage() {
         </Card>
       )}
 
-      {/* Submission verification. */}
+      {/* Submission verification. Under the one-submission policy a level accepts
+          exactly one non-rejected solution, so a recorded attempt renders as a
+          read-only summary. Only a rejected attempt re-opens the form. */}
       {level.requireVerifiedSubmission ? (
-        submission?.status === "VERIFIED" ? (
-          <Card className="border-foreground/30 p-5">
-            <div className="flex items-center gap-3">
-              <CheckCircle2 className="size-6" />
-              <div>
-                <p className="font-semibold">Submission verified</p>
-                <p className="text-sm text-muted">
-                  Your solution was verified {formatDate(submission.verified_at)}.
-                </p>
-              </div>
-            </div>
-          </Card>
+        submission && submission.status !== "REJECTED" ? (
+          <SubmittedSolutionPanel submission={submission} />
         ) : (
           <SubmissionPanel
+            key={level.id}
             levelId={level.id}
             screenshotStorageEnabled={screenshotStorageEnabled}
             existing={submission}
             onSubmissionSuccess={handleSubmissionSuccess}
-            onSubmitted={load}
           />
         )
       ) : (
@@ -308,14 +307,16 @@ export default function LevelPage() {
           key={phase.phase}
           phase={phase}
           levelId={level.id}
+          submittedDetail={submissionDetailFor("AFTER")}
           onSubmitted={(result) => {
             toast[result.passed ? "success" : "warning"](
               result.passed
                 ? `Assessment passed with ${result.score}/${result.maxScore}.`
                 : result.requiresManualGrading
-                  ? "Submitted. Some answers need manual grading."
-                  : `Scored ${result.score}/${result.maxScore}. ${result.percent}% (needs ${level.passingScore}%).`,
+                  ? "Submitted. Your text answers will be reviewed by the organisers."
+                  : `Submit recorded. Scored ${result.score}/${result.maxScore} (${result.percent}%).`,
             );
+            applyProgressUpdate(result.completed ?? false, result.nextLevel ?? null, result.totalLevels);
             load();
           }}
         />
@@ -337,7 +338,12 @@ export default function LevelPage() {
               </div>
             </div>
             {nextLevel ? (
-              <Link to={`/dashboard/level/${nextLevel.id}`} className="shrink-0">
+              <Link
+                to={`/dashboard/level/${nextLevel.id}`}
+                className="shrink-0"
+                onMouseEnter={() => prefetchLevel(nextLevel.id)}
+                onFocus={() => prefetchLevel(nextLevel.id)}
+              >
                 <Button size="lg">
                   Continue to Level {String(nextLevel.levelNumber).padStart(2, "0")} →
                 </Button>
@@ -353,28 +359,97 @@ export default function LevelPage() {
         </Card>
       ) : null}
 
+      {isCompleted && !nextLevel ? (
+        <FinalizeContestCard allCompleted finalizedAt={undefined} />
+      ) : null}
+
       {attempts.length > 0 ? (
         <Card className="p-5">
           <CardTitle className="mb-3">Assessment attempts</CardTitle>
-          <div className="space-y-2">
-            {attempts.map((attempt) => (
-              <div
-                key={attempt.id}
-                className="flex items-center justify-between rounded-lg border border-border bg-surface-2/40 px-3.5 py-2.5 text-sm"
-              >
-                <span className="text-muted">
-                  {attempt.phase} · attempt #{attempt.attempt_number}
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="text-muted">
-                    {attempt.score}/{attempt.max_score}
-                  </span>
-                  <Badge variant={attempt.passed ? "success" : attempt.status === "GRADED" ? "danger" : "warning"}>
-                    {attempt.status === "GRADED" ? (attempt.passed ? "Passed" : "Failed") : attempt.status}
-                  </Badge>
-                </span>
-              </div>
-            ))}
+          <p className="mb-3 text-xs text-muted">
+            Each quiz accepts exactly one submission per phase. Submitted answers are locked and
+            cannot be changed.
+          </p>
+          <div className="space-y-3">
+            {attempts.map((detail) => {
+              const { attempt } = detail;
+              const primary = attempt.is_submission;
+              return (
+                <div
+                  key={attempt.id}
+                  className={cn(
+                    "rounded-lg border px-3.5 py-3 text-sm",
+                    primary ? "border-foreground/30 bg-surface-2/60" : "border-border bg-surface-2/40",
+                  )}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-foreground">
+                      {attempt.phase} · attempt #{attempt.attempt_number}
+                      {primary ? (
+                        <Badge variant="success" className="ml-2">
+                          Locked submission
+                        </Badge>
+                      ) : null}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {attempt.submitted_at ? (
+                        <span className="hidden text-muted sm:block">
+                          {formatDate(attempt.submitted_at)}
+                        </span>
+                      ) : null}
+                      <span className="text-muted">
+                        {attempt.score}/{attempt.max_score}
+                      </span>
+                      <Badge
+                        variant={
+                          attempt.passed
+                            ? "success"
+                            : attempt.status === "GRADED"
+                              ? "danger"
+                              : "warning"
+                        }
+                      >
+                        {attempt.status === "GRADED"
+                          ? attempt.passed
+                            ? "Passed"
+                            : "Failed"
+                          : attempt.status}
+                      </Badge>
+                    </span>
+                  </div>
+                  {detail.answers.length > 0 ? (
+                    <ul className="mt-3 space-y-2 border-t border-border pt-3">
+                      {detail.answers.map((answer) => (
+                        <li key={answer.questionId} className="text-xs">
+                          <p className="flex flex-wrap items-center gap-1.5 text-muted-strong">
+                            <span className="font-medium text-foreground">{answer.questionText}</span>
+                            <span className="text-muted">({answer.pointsAwarded} pts)</span>
+                            {answer.isCorrect === true ? (
+                              <Badge variant="success">Correct</Badge>
+                            ) : answer.isCorrect === null ? (
+                              <Badge variant="neutral">Under review</Badge>
+                            ) : (
+                              <Badge variant="danger">Incorrect</Badge>
+                            )}
+                          </p>
+                          {answer.textAnswer ? (
+                            <p className="mt-1 rounded-md border border-border bg-surface-1/60 px-2.5 py-1.5 text-muted-strong">
+                              {answer.textAnswer}
+                            </p>
+                          ) : null}
+                          {answer.selectedOptions.length > 0 ? (
+                            <p className="mt-1 text-muted">
+                              Selected:{" "}
+                              {answer.selectedOptions.map((option) => option.text).join(", ")}
+                            </p>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         </Card>
       ) : null}
@@ -385,22 +460,33 @@ export default function LevelPage() {
 function AssessmentPanel({
   phase,
   levelId,
+  submittedDetail,
   onSubmitted,
 }: {
   phase: PhaseState;
   levelId: string;
+  submittedDetail: AttemptDetail | null;
   onSubmitted: (result: SubmitResult) => void;
 }) {
   const [answers, setAnswers] = useState<Record<string, { ids: string[]; text: string }>>({});
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmitResult | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const canAttempt = phase.remainingAttempts > 0;
+  // One-submission policy: once a submission exists the phase is locked forever.
+  const locked = phase.submitted || Boolean(submittedDetail);
+  const canAttempt = !locked;
+
   const resultByQuestion = useMemo(() => {
     const map = new Map<string, SubmitResult["answers"][number]>();
     result?.answers.forEach((a) => map.set(a.questionId, a));
     return map;
   }, [result]);
+
+  const boundsFor = (question: PhaseState["questions"][number]) => ({
+    min: question.minLength ?? 1,
+    max: question.maxLength ?? 4000,
+  });
 
   const setAnswer = (questionId: string, patch: Partial<{ ids: string[]; text: string }>) =>
     setAnswers((prev) => {
@@ -408,7 +494,35 @@ function AssessmentPanel({
       return { ...prev, [questionId]: { ...current, ...patch } };
     });
 
+  // Mirrors the server-side validation: every question must be answered before
+  // the single allowed submission is consumed.
+  const validateAnswers = (): string | null => {
+    for (const question of phase.questions) {
+      const answer = answers[question.id] ?? { ids: [], text: "" };
+      if (question.type === "SHORT_TEXT") {
+        const { min, max } = boundsFor(question);
+        const text = answer.text.trim();
+        if (text.length < min) {
+          return `Answer "${question.text}" is required (minimum ${min} characters).`;
+        }
+        if (text.length > max) {
+          return `Answer "${question.text}" is too long (maximum ${max} characters).`;
+        }
+      } else if (answer.ids.length === 0) {
+        return `Please choose an answer for: ${question.text}`;
+      }
+    }
+    return null;
+  };
+
   const handleSubmit = async () => {
+    const invalid = validateAnswers();
+    if (invalid) {
+      toast.error(invalid);
+      return;
+    }
+    setConfirmOpen(false);
+
     const payload = phase.questions.map((q) => {
       const answer = answers[q.id] ?? { ids: [], text: "" };
       return {
@@ -417,11 +531,6 @@ function AssessmentPanel({
         textAnswer: answer.text.trim() || undefined,
       };
     });
-
-    if (payload.every((p) => !p.selectedOptionIds && !p.textAnswer)) {
-      toast.error("Please answer at least one question.");
-      return;
-    }
 
     setSubmitting(true);
     try {
@@ -439,6 +548,13 @@ function AssessmentPanel({
     }
   };
 
+  const lockedAttempt = locked ? submittedDetail : null;
+  const lockedPercent = lockedAttempt
+    ? lockedAttempt.attempt.max_score === 0
+      ? 100
+      : Math.round((lockedAttempt.attempt.score / lockedAttempt.attempt.max_score) * 100)
+    : 0;
+
   return (
     <Card>
       <CardHeader>
@@ -446,135 +562,320 @@ function AssessmentPanel({
           <CardTitle>{phase.phase === "BEFORE" ? "Answer before you code" : "Answer after you code"}</CardTitle>
           <div className="flex items-center gap-2">
             {phase.passed ? <Badge variant="success">Passed</Badge> : null}
-            <Badge variant="neutral">
-              {phase.remainingAttempts}/{phase.maxAttempts} attempts left
-            </Badge>
+            {locked ? (
+              <Badge variant="success">Submitted · locked</Badge>
+            ) : (
+              <Badge variant="neutral">1 submission</Badge>
+            )}
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {phase.questions.length === 0 ? (
-          <p className="text-sm text-muted">No questions configured for this phase.</p>
-        ) : (
-          phase.questions.map((question, index) => {
-            const answer = answers[question.id] ?? { ids: [], text: "" };
-            const graded = resultByQuestion.get(question.id);
-            return (
-              <div key={question.id} className="rounded-xl border border-border bg-surface-2/40 p-4">
-                <p className="mb-3 text-sm font-medium">
-                  <span className="mr-2 text-muted">{index + 1}.</span>
-                  {question.text}
-                  <span className="ml-2 text-xs text-muted">{question.points} pts</span>
-                </p>
 
-                {question.type === "SHORT_TEXT" ? (
-                  <Input
-                    placeholder="Your answer"
-                    value={answer.text}
-                    disabled={!canAttempt || Boolean(result)}
-                    onChange={(e) => setAnswer(question.id, { text: e.target.value })}
-                  />
-                ) : question.type === "MULTIPLE_CHOICE" ? (
-                  <div className="space-y-2">
-                    {question.options.map((option) => (
-                      <Checkbox
-                        key={option.id}
-                        label={option.text}
-                        checked={answer.ids.includes(option.id)}
-                        disabled={!canAttempt || Boolean(result)}
-                        onChange={(checked) =>
-                          setAnswer(question.id, {
-                            ids: checked
-                              ? [...answer.ids, option.id]
-                              : answer.ids.filter((id) => id !== option.id),
-                          })
-                        }
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <RadioGroup
-                    value={answer.ids[0] ?? ""}
-                    onChange={(value) => setAnswer(question.id, { ids: [value] })}
-                    options={question.options.map((option) => ({ value: option.id, label: option.text }))}
-                  />
-                )}
-
-                {graded ? (
-                  <div
-                    className={cn(
-                      "mt-3 rounded-lg border p-3 text-xs",
-                      graded.isCorrect
-                        ? "border-foreground/40 bg-foreground/10 text-foreground"
-                        : graded.isCorrect === null
-                          ? "border-border-strong bg-surface-2 text-muted-strong"
-                          : "border-foreground bg-transparent text-foreground",
-                    )}
-                  >
-                    <p className="flex items-center gap-1.5 font-semibold">
-                      {graded.isCorrect ? (
-                        <CheckCircle2 className="size-3.5" />
-                      ) : graded.isCorrect === null ? (
-                        <ShieldCheck className="size-3.5" />
-                      ) : (
-                        <XCircle className="size-3.5" />
-                      )}
-                      {graded.isCorrect ? "Correct" : graded.isCorrect === null ? "Awaiting manual grading" : "Incorrect"}
-                      <span className="ml-1 text-muted-strong">({graded.pointsAwarded} pts)</span>
-                    </p>
-                    {graded.explanation ? (
-                      <p className="mt-1 text-muted-strong">{graded.explanation}</p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })
-        )}
-
-        {result ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface-2/50 p-4">
-            <div>
-              <p className="text-sm font-semibold">
-                Result: {result.score}/{result.maxScore} ({result.percent}%)
-              </p>
-              <p className="text-xs text-muted">
-                {result.requiresManualGrading
-                  ? "Some answers will be reviewed manually."
-                  : result.passed
-                    ? "You passed this assessment."
-                    : "You did not meet the passing threshold. You may retry if attempts remain."}
+      {locked && lockedAttempt ? (
+        <CardContent className="space-y-4">
+          <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-2/40 p-3.5">
+            <Lock className="mt-0.5 size-5 shrink-0 text-muted-strong" />
+            <div className="text-sm">
+              <p className="font-semibold text-foreground">Answers submitted — locked</p>
+              <p className="mt-0.5 text-muted">
+                Submitted{" "}
+                {lockedAttempt.attempt.submitted_at
+                  ? formatDate(lockedAttempt.attempt.submitted_at)
+                  : "recently"}
+                . This quiz accepts exactly one submission per phase, so these answers can no longer
+                be changed.
               </p>
             </div>
-            {result.passed ? (
-              <Badge variant="success">Passed</Badge>
-            ) : (
-              <Badge variant="danger">Not passed</Badge>
-            )}
+          </div>
+
+          <dl className="grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
+            <div>
+              <dt className="text-muted">Score</dt>
+              <dd className="font-medium text-foreground">
+                {lockedAttempt.attempt.score}/{lockedAttempt.attempt.max_score} ({lockedPercent}%)
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted">Status</dt>
+              <dd className="font-medium text-foreground">
+                {lockedAttempt.attempt.status === "GRADED"
+                  ? lockedAttempt.attempt.passed
+                    ? "Passed"
+                    : "Failed"
+                  : "Submitted for review"}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="space-y-2">
+            {lockedAttempt.answers.map((answer) => (
+              <div
+                key={answer.questionId}
+                className="rounded-lg border border-border bg-surface-2/40 p-3.5"
+              >
+                <p className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
+                  {answer.questionText}
+                  <span className="text-xs text-muted">({answer.pointsAwarded} pts)</span>
+                  {answer.isCorrect === true ? (
+                    <Badge variant="success">Correct</Badge>
+                  ) : answer.isCorrect === null ? (
+                    <Badge variant="neutral">Submitted for review</Badge>
+                  ) : (
+                    <Badge variant="danger">Incorrect</Badge>
+                  )}
+                </p>
+                {answer.textAnswer ? (
+                  <p className="mt-2 whitespace-pre-line rounded-md border border-border bg-surface-1/60 px-3 py-2 text-sm text-muted-strong">
+                    {answer.textAnswer}
+                  </p>
+                ) : null}
+                {answer.selectedOptions.length > 0 ? (
+                  <ul className="mt-2 space-y-1 text-xs text-muted">
+                    {answer.selectedOptions.map((option) => (
+                      <li key={option.id} className="flex items-center gap-1.5">
+                        <span className="size-1.5 rounded-full bg-border" /> {option.text}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      ) : (
+        <CardContent className="space-y-4">
+          {phase.questions.length === 0 ? (
+            <p className="text-sm text-muted">No questions configured for this phase.</p>
+          ) : (
+            phase.questions.map((question, index) => {
+              const answer = answers[question.id] ?? { ids: [], text: "" };
+              const graded = resultByQuestion.get(question.id);
+              const { min, max } = boundsFor(question);
+              const textLength = answer.text.trim().length;
+              return (
+                <div key={question.id} className="rounded-xl border border-border bg-surface-2/40 p-4">
+                  <p className="mb-3 text-sm font-medium">
+                    <span className="mr-2 text-muted">{index + 1}.</span>
+                    {question.text}
+                    <span className="ml-2 text-xs text-muted">{question.points} pts</span>
+                  </p>
+
+                  {question.type === "SHORT_TEXT" ? (
+                    <div className="space-y-1.5">
+                      <Textarea
+                        placeholder="Type your explanation…"
+                        value={answer.text}
+                        disabled={!canAttempt || Boolean(result)}
+                        onChange={(e) => setAnswer(question.id, { text: e.target.value })}
+                        className="min-h-28"
+                      />
+                      <p className="flex justify-between text-[11px] text-muted">
+                        <span>
+                          {textLength < min
+                            ? `Required — at least ${min} characters.`
+                            : textLength > max
+                              ? `Too long — maximum ${max} characters.`
+                              : "Required answer."}
+                        </span>
+                        <span className={cn(textLength < min || textLength > max ? "text-danger" : "")}>
+                          {textLength}/{max || 4000}
+                        </span>
+                      </p>
+                    </div>
+                  ) : question.type === "MULTIPLE_CHOICE" ? (
+                    <div className="space-y-2">
+                      {question.options.map((option) => (
+                        <Checkbox
+                          key={option.id}
+                          label={option.text}
+                          checked={answer.ids.includes(option.id)}
+                          disabled={!canAttempt || Boolean(result)}
+                          onChange={(checked) =>
+                            setAnswer(question.id, {
+                              ids: checked
+                                ? [...answer.ids, option.id]
+                                : answer.ids.filter((id) => id !== option.id),
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <RadioGroup
+                      value={answer.ids[0] ?? ""}
+                      onChange={(value) => setAnswer(question.id, { ids: [value] })}
+                      options={question.options.map((option) => ({ value: option.id, label: option.text }))}
+                    />
+                  )}
+
+                  {graded ? (
+                    <div
+                      className={cn(
+                        "mt-3 rounded-lg border p-3 text-xs",
+                        graded.isCorrect
+                          ? "border-foreground/40 bg-foreground/10 text-foreground"
+                          : graded.isCorrect === null
+                            ? "border-border-strong bg-surface-2 text-muted-strong"
+                            : "border-foreground bg-transparent text-foreground",
+                      )}
+                    >
+                      <p className="flex items-center gap-1.5 font-semibold">
+                        {graded.isCorrect ? (
+                          <CheckCircle2 className="size-3.5" />
+                        ) : graded.isCorrect === null ? (
+                          <ShieldCheck className="size-3.5" />
+                        ) : (
+                          <XCircle className="size-3.5" />
+                        )}
+                        {graded.isCorrect
+                          ? "Correct"
+                          : graded.isCorrect === null
+                            ? "Submitted for review"
+                            : "Incorrect"}
+                        <span className="ml-1 text-muted-strong">({graded.pointsAwarded} pts)</span>
+                      </p>
+                      {graded.explanation ? (
+                        <p className="mt-1 text-muted-strong">{graded.explanation}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+
+          {result ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface-2/50 p-4">
+              <div>
+                <p className="text-sm font-semibold">
+                  Result: {result.score}/{result.maxScore} ({result.percent}%)
+                </p>
+                <p className="text-xs text-muted">
+                  {result.requiresManualGrading
+                    ? "Submitted. Your text answers will be reviewed by the organisers."
+                    : result.passed
+                      ? "You passed this assessment."
+                      : "Your submission has been recorded. This quiz accepts exactly one submission, so you cannot retry."}
+                </p>
+              </div>
+              {result.passed ? (
+                <Badge variant="success">Passed</Badge>
+              ) : (
+                <Badge variant="danger">Not passed</Badge>
+              )}
+            </div>
+          ) : null}
+
+          {canAttempt ? (
+            <div className="flex items-center gap-3">
+              <Button onClick={() => setConfirmOpen(true)} loading={submitting}>
+                <Send className="size-4" /> Submit answers
+              </Button>
+            </div>
+          ) : null}
+        </CardContent>
+      )}
+
+      <Dialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        title="Submit Quiz?"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
+              Back
+            </Button>
+            <Button onClick={handleSubmit} loading={submitting}>
+              Submit quiz
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-muted">
+          You can submit this quiz only once. Your answers will be locked and you will not be able
+          to change them.
+        </p>
+      </Dialog>
+    </Card>
+  );
+}
+
+function SubmittedSolutionPanel({ submission }: { submission: CodingSubmissionRow }) {
+  const verified = submission.status === "VERIFIED";
+  return (
+    <Card className={verified ? "border-foreground/30" : undefined}>
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Submitted Solution</CardTitle>
+          <Badge className={submissionMeta[submission.status].className}>
+            {submissionMeta[submission.status].label}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-2/40 p-3.5">
+          {verified ? (
+            <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-foreground" />
+          ) : (
+            <ShieldCheck className="mt-0.5 size-5 shrink-0 text-muted-strong" />
+          )}
+          <div className="text-sm">
+            <p className="font-semibold text-foreground">
+              {verified ? "Submission verified" : "Attempt recorded — awaiting review"}
+            </p>
+            <p className="mt-0.5 text-muted">
+              {verified
+                ? `Your solution was verified ${formatDate(submission.verified_at)}. This level is locked.`
+                : "Your solution has been reported and the next level is unlocked. It will be verified during the audit."}
+            </p>
+          </div>
+        </div>
+
+        <dl className="grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
+          <div>
+            <dt className="text-muted">Attempt</dt>
+            <dd className="font-medium text-foreground">#{submission.attempt_number}</dd>
+          </div>
+          <div>
+            <dt className="text-muted">Language</dt>
+            <dd className="font-medium text-foreground">{submission.programming_language ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-muted">Submitted (IST)</dt>
+            <dd className="font-medium text-foreground">{formatDate(submission.created_at)}</dd>
+          </div>
+          {submission.submission_url ? (
+            <div className="sm:col-span-2">
+              <dt className="text-muted">LeetCode submission</dt>
+              <dd>
+                <a
+                  href={submission.submission_url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="break-all font-mono text-foreground hover:underline"
+                >
+                  {submission.submission_url}
+                </a>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+
+        {submission.source_code ? (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-strong">
+              Your solution
+            </p>
+            <pre className="max-h-80 overflow-auto rounded-lg border border-border bg-surface-2/40 p-3.5 font-mono text-xs leading-relaxed text-foreground">
+              {submission.source_code}
+            </pre>
           </div>
         ) : null}
 
-        {canAttempt ? (
-          <div className="flex items-center gap-3">
-            {result ? (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setAnswers({});
-                  setResult(null);
-                }}
-              >
-                <RefreshCw className="size-4" /> Try again
-              </Button>
-            ) : (
-              <Button onClick={handleSubmit} loading={submitting}>
-                <Send className="size-4" /> Submit answers
-              </Button>
-            )}
-          </div>
-        ) : !result ? (
-          <p className="text-sm text-muted">No attempts remaining for this assessment.</p>
-        ) : null}
+        <p className="rounded-md border border-border bg-surface-2/30 p-3 text-[11px] text-muted-strong">
+          Each level accepts exactly one solution. If a reviewer rejects this attempt, the level
+          reopens so you can submit a new one.
+        </p>
       </CardContent>
     </Card>
   );
@@ -593,12 +894,17 @@ function SubmissionPanel({
   onSubmissionSuccess?: (res: SubmissionResponse) => void;
   onSubmitted?: () => void;
 }) {
-  const [submissionUrl, setSubmissionUrl] = useState(existing?.submission_url ?? "");
-  const [note, setNote] = useState(existing?.student_note ?? "");
-  const [screenshotPath, setScreenshotPath] = useState(existing?.screenshot_path ?? "");
-  const [sourceCode, setSourceCode] = useState(existing?.source_code ?? "");
-  const [programmingLanguage, setProgrammingLanguage] = useState(existing?.programming_language ?? "python");
-  const [codeFileName, setCodeFileName] = useState(existing?.code_file_name ?? "");
+  // The editable fields always start blank: `existing` is used only to render
+  // read-only status/summary for the latest attempt. This keeps the form clean
+  // when moving between levels and lets a student report a fresh attempt without
+  // overwriting the previous one.
+  const [submissionUrl, setSubmissionUrl] = useState("");
+  const [urlError, setUrlError] = useState("");
+  const [note, setNote] = useState("");
+  const [screenshotPath, setScreenshotPath] = useState("");
+  const [sourceCode, setSourceCode] = useState("");
+  const [programmingLanguage, setProgrammingLanguage] = useState("python");
+  const [codeFileName, setCodeFileName] = useState("");
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -642,8 +948,9 @@ function SubmissionPanel({
   };
 
   const handleSubmit = async () => {
-    if (!submissionUrl.trim()) {
-      toast.error("LeetCode submission URL is required.");
+    const parsedUrl = parseLeetcodeSubmissionDetailUrl(submissionUrl);
+    if (!parsedUrl) {
+      setUrlError(LEETCODE_SUBMISSION_URL_MESSAGE);
       return;
     }
     if (!sourceCode.trim()) {
@@ -654,7 +961,7 @@ function SubmissionPanel({
     try {
       const res = await api.post<SubmissionResponse>("/api/student/submissions", {
         levelId,
-        submissionUrl: submissionUrl.trim(),
+        submissionUrl: parsedUrl.url,
         screenshotPath: screenshotPath || undefined,
         note: note || undefined,
         sourceCode: sourceCode.trim(),
@@ -716,11 +1023,56 @@ function SubmissionPanel({
           </div>
         ) : null}
 
-        <Field label="LeetCode Submission URL (Required)">
+        {existing ? (
+          <div className="space-y-2 rounded-lg border border-border bg-surface-2/40 p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-strong">
+                Latest submission · Attempt #{existing.attempt_number}
+              </span>
+              <Badge className={status.className}>{status.label}</Badge>
+            </div>
+            <dl className="grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
+              <div>
+                <dt className="text-muted">Language</dt>
+                <dd className="font-medium text-foreground">
+                  {existing.programming_language ?? "—"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted">Submitted (IST)</dt>
+                <dd className="font-medium text-foreground">{formatDate(existing.created_at)}</dd>
+              </div>
+              {existing.submission_url ? (
+                <div className="sm:col-span-2">
+                  <dt className="text-muted">LeetCode submission</dt>
+                  <dd>
+                    <a
+                      href={existing.submission_url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="break-all font-mono text-foreground hover:underline"
+                    >
+                      {existing.submission_url}
+                    </a>
+                  </dd>
+                </div>
+              ) : null}
+            </dl>
+            <p className="text-[11px] text-muted">
+              A level accepts a single solution. This will replace the rejected attempt once submitted.
+            </p>
+          </div>
+        ) : null}
+
+        <Field label="LeetCode Submission Detail URL (Required)" error={urlError || undefined}>
           <Input
-            placeholder="https://leetcode.com/submissions/detail/..."
+            placeholder="https://leetcode.com/submissions/detail/2165837360/"
             value={submissionUrl}
-            onChange={(e) => setSubmissionUrl(e.target.value)}
+            aria-invalid={Boolean(urlError)}
+            onChange={(e) => {
+              setSubmissionUrl(e.target.value);
+              if (urlError) setUrlError("");
+            }}
           />
         </Field>
 

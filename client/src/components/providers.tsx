@@ -1,6 +1,7 @@
 import { Toaster } from "sonner";
 import { SessionProvider } from "@/components/session-provider";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
+import { DataSyncListener } from "@/lib/data-sync";
 
 function ThemedToaster() {
   const { theme } = useTheme();
@@ -25,6 +26,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     <ThemeProvider>
       <SessionProvider>
         {children}
+        <DataSyncListener />
         <ThemedToaster />
       </SessionProvider>
     </ThemeProvider>

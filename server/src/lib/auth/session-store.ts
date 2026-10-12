@@ -22,6 +22,12 @@ export interface SessionMeta {
 
 export interface ActiveStudentSession {
   student: PublicStudent;
+  /**
+   * The full, private student row resolved from the same session lookup. Routes
+   * use this instead of issuing a second `select * from students` round trip on
+   * every authenticated request.
+   */
+  studentRow: StudentRow;
   sessionId: string;
   csrfToken: string;
 }
@@ -109,8 +115,16 @@ export async function getStudentBySessionToken(
   if (row.session_revoked_at) return null;
   if (new Date(row.session_expires_at).getTime() < Date.now()) return null;
   if (!row.is_active) return null;
+  const {
+    session_id: _sessionId,
+    session_csrf: _sessionCsrf,
+    session_expires_at: _sessionExpiresAt,
+    session_revoked_at: _sessionRevokedAt,
+    ...studentRow
+  } = row;
   return {
     student: toPublicStudent(row),
+    studentRow,
     sessionId: row.session_id,
     csrfToken: row.session_csrf,
   };

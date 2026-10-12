@@ -7,7 +7,6 @@ import {
   Code2,
   ExternalLink,
   ShieldCheck,
-  Trophy,
 } from "lucide-react";
 import { CsiBrand } from "@/components/brand";
 import { SiteFooter } from "@/components/site-footer";
@@ -111,11 +110,6 @@ export default function LandingPage() {
                   ) : null}
                 </>
               )}
-              <Link to="/leaderboard">
-                <Button size="lg" variant="ghost">
-                  <Trophy className="size-4" /> Leaderboard
-                </Button>
-              </Link>
             </div>
 
             <div className="mt-6">

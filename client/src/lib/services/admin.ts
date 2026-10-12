@@ -50,6 +50,8 @@ export interface AdminQuestion {
   correct_text: string | null;
   explanation: string;
   variant_group: string | null;
+  min_length: number | null;
+  max_length: number | null;
   is_active: boolean;
   options: { id: string; option_text: string; is_correct: boolean; order_index: number }[];
 }

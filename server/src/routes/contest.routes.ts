@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getStudentSession } from "@/lib/auth/session";
+import { requireAdmin } from "@/lib/auth/guard";
 import { errors } from "@/lib/errors";
 import { asyncHandler, ok } from "@/lib/http";
 import { getContestBundle, requireActiveContest } from "@/lib/services/contest";
@@ -27,6 +27,7 @@ contestRoutes.get(
 contestRoutes.get(
   "/leaderboard",
   asyncHandler(async (req, res) => {
+    await requireAdmin(req);
     const yearParam = Number(req.query.year);
     if (yearParam !== 1 && yearParam !== 2) {
       throw errors.badRequest("Query parameter 'year' must be 1 or 2.");
@@ -35,10 +36,7 @@ contestRoutes.get(
     if (!contest.leaderboard_visible) {
       throw errors.forbidden("The leaderboard is currently hidden.");
     }
-    const session = await getStudentSession(req);
-    const entries = await getLeaderboard(contest, yearParam as Year, {
-      currentStudentId: session?.student.id,
-    });
+    const entries = await getLeaderboard(contest, yearParam as Year, {});
     ok(res, { entries, year: yearParam });
   }),
 );

@@ -59,7 +59,7 @@ describe("database schema", () => {
     ).rejects.toThrow();
   });
 
-  it("allows multiple submission attempts per student/level to preserve history", async () => {
+  it("preserves attempt history while enforcing one official submission per level", async () => {
     const { rows } = await test.db.query<{ id: string }>(
       "insert into contests (slug, name) values ('c2', 'Contest') returning id",
     );
@@ -79,15 +79,37 @@ describe("database schema", () => {
     );
     const studentId = student.rows[0].id;
     const levelId = level.rows[0].id;
-    await test.db.query(
-      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 1)",
+
+    // The first non-rejected submission becomes the official (slot-owning) row.
+    const first = await test.db.query<{ is_official: boolean }>(
+      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 1) returning is_official",
       [studentId, levelId],
     );
-    const second = await test.db.query(
-      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 2) returning id",
+    expect(first.rows[0].is_official).toBe(true);
+
+    // A second non-rejected submission would create two official rows, so the
+    // partial unique index rejects it immediately (multi-attempt *history* of
+    // non-rejected rows is no longer allowed — one active submission per level).
+    await expect(
+      test.db.query(
+        "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'PENDING_REVIEW', 2)",
+        [studentId, levelId],
+      ),
+    ).rejects.toThrow();
+
+    // Rejected rows never lock the level; multiple rejects are preserved as
+    // history and remain insertable.
+    const rejected = await test.db.query<{ is_official: boolean }>(
+      "insert into coding_submissions (student_id, level_id, status, attempt_number) values ($1, $2, 'REJECTED', 3) returning is_official",
       [studentId, levelId],
     );
-    expect(second.rows).toHaveLength(1);
+    expect(rejected.rows[0].is_official).toBe(false);
+
+    const total = await test.db.query<{ count: number }>(
+      "select count(*)::int as count from coding_submissions where student_id = $1 and level_id = $2",
+      [studentId, levelId],
+    );
+    expect(total.rows[0].count).toBe(2);
   });
 
   it("enforces score event idempotency keys", async () => {

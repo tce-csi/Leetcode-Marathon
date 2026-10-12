@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Switch } from "@/components/ui/controls";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
@@ -18,6 +19,8 @@ export interface QuestionFormValues {
   correctText: string;
   explanation: string;
   variantGroup: string;
+  minLength?: number;
+  maxLength?: number;
   isActive: boolean;
   options: QuestionOptionValue[];
 }
@@ -52,6 +55,10 @@ export function QuestionForm({
 }) {
   const [values, setValues] = useState<QuestionFormValues>(initial);
   const isText = values.questionType === "SHORT_TEXT";
+  const isChoice =
+    values.questionType === "SINGLE_CHOICE" ||
+    values.questionType === "MULTIPLE_CHOICE" ||
+    values.questionType === "TRUE_FALSE";
   const singleCorrect = values.questionType === "SINGLE_CHOICE" || values.questionType === "TRUE_FALSE";
 
   const setOption = (index: number, patch: Partial<QuestionOptionValue>) =>
@@ -74,9 +81,18 @@ export function QuestionForm({
     const options = isText
       ? []
       : values.options.filter((option) => option.optionText.trim() !== "");
+    // Validate character bounds before sending (defaults 1..4000).
+    const minLength = values.minLength;
+    const maxLength = values.maxLength;
+    if (isText && minLength !== undefined && maxLength !== undefined && minLength > maxLength) {
+      toast.warning("Minimum length cannot exceed maximum length.");
+      return;
+    }
     onSubmit({
       ...values,
       options,
+      minLength,
+      maxLength,
     });
   };
 
@@ -96,10 +112,10 @@ export function QuestionForm({
             value={values.questionType}
             onChange={(e) => setValues((prev) => ({ ...prev, questionType: e.target.value as QuestionType }))}
           >
-            <option value="SINGLE_CHOICE">Single choice</option>
-            <option value="MULTIPLE_CHOICE">Multiple choice</option>
+            <option value="SINGLE_CHOICE">Multiple Choice (single)</option>
+            <option value="MULTIPLE_CHOICE">Multiple Choice (multi)</option>
             <option value="TRUE_FALSE">True / False</option>
-            <option value="SHORT_TEXT">Short text</option>
+            <option value="SHORT_TEXT">Short Text Answer</option>
           </Select>
         </Field>
         <Field label="Phase">
@@ -122,16 +138,62 @@ export function QuestionForm({
       </div>
 
       {isText ? (
-        <Field label="Expected answer" hint="Grading is case-insensitive and trims whitespace.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Minimum length (chars)" hint="Required minimum. Defaults to 1.">
+            <Input
+              type="number"
+              min={1}
+              max={4000}
+              value={values.minLength ?? ""}
+              onChange={(e) =>
+                setValues((prev) => ({
+                  ...prev,
+                  minLength: e.target.value === "" ? undefined : Number(e.target.value),
+                }))
+              }
+              placeholder="1"
+            />
+          </Field>
+          <Field label="Maximum length (chars)" hint="Required maximum. Defaults to 4000.">
+            <Input
+              type="number"
+              min={1}
+              max={4000}
+              value={values.maxLength ?? ""}
+              onChange={(e) =>
+                setValues((prev) => ({
+                  ...prev,
+                  maxLength: e.target.value === "" ? undefined : Number(e.target.value),
+                }))
+              }
+              placeholder="4000"
+            />
+          </Field>
+        </div>
+      ) : null}
+
+      {isText ? (
+        <Field
+          label="Reference answer (optional)"
+          hint="For the judges' reference only — text answers are never auto-graded."
+        >
           <Input
             value={values.correctText}
             onChange={(e) => setValues((prev) => ({ ...prev, correctText: e.target.value }))}
-            placeholder="hash map"
+            placeholder="e.g. Explains the O(1) hash-map lookup"
           />
         </Field>
-      ) : (
+      ) : null}
+
+      {isChoice ? (
         <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-strong">Options</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-strong">Options</p>
+            <p className="text-xs text-muted">
+              {values.options.filter((option) => option.optionText.trim() !== "").length} option
+              {values.options.filter((option) => option.optionText.trim() !== "").length === 1 ? "" : "s"}
+            </p>
+          </div>
           {values.options.map((option, index) => (
             <div key={index} className="flex items-center gap-2">
               <Checkbox
@@ -171,7 +233,7 @@ export function QuestionForm({
             <Plus className="size-4" /> Add option
           </Button>
         </div>
-      )}
+      ) : null}
 
       <Field label="Explanation (shown after grading)">
         <Textarea

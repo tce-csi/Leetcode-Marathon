@@ -6,7 +6,6 @@ import type { ContestTrackRow, Difficulty } from "@/lib/types";
 
 export interface LevelFormValues {
   trackId: string;
-  levelNumber: number;
   title: string;
   description: string;
   teaser: string;
@@ -30,7 +29,6 @@ export interface LevelFormValues {
 export function emptyLevelValues(tracks: ContestTrackRow[]): LevelFormValues {
   return {
     trackId: tracks[0]?.id ?? "",
-    levelNumber: 1,
     title: "",
     description: "",
     teaser: "",
@@ -52,6 +50,7 @@ export function LevelForm({
   initial,
   submitLabel,
   busy,
+  trackLocked,
   onSubmit,
   onCancel,
 }: {
@@ -59,6 +58,8 @@ export function LevelForm({
   initial: LevelFormValues;
   submitLabel: string;
   busy?: boolean;
+  /** Editing an existing level: the track cannot be changed. */
+  trackLocked?: boolean;
   onSubmit: (values: LevelFormValues) => void;
   onCancel?: () => void;
 }) {
@@ -87,7 +88,11 @@ export function LevelForm({
     <div className="space-y-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Track">
-          <Select value={values.trackId} onChange={(e) => set("trackId", e.target.value)}>
+          <Select
+            value={values.trackId}
+            disabled={trackLocked}
+            onChange={(e) => set("trackId", e.target.value)}
+          >
             {tracks.map((track) => (
               <option key={track.id} value={track.id}>
                 {track.name} ({track.year === 1 ? "1st" : "2nd"} year)
@@ -95,14 +100,13 @@ export function LevelForm({
             ))}
           </Select>
         </Field>
-        <Field label="Level number">
-          <Input
-            type="number"
-            min={1}
-            value={values.levelNumber}
-            onChange={(e) => set("levelNumber", Number(e.target.value))}
-          />
-        </Field>
+        {!trackLocked ? (
+          <Field label="Level number">
+            <p className="flex h-10 items-center rounded-lg border border-dashed border-border bg-surface-2/40 px-3 text-sm text-muted">
+              New level will be added at the end of this track.
+            </p>
+          </Field>
+        ) : null}
       </div>
 
       <Field label="Title">

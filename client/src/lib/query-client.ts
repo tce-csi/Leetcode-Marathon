@@ -5,7 +5,12 @@ export const queryClient = new QueryClient({
     queries: {
       retry: 1,
       refetchOnWindowFocus: true,
-      staleTime: 5000,
+      // A short shared freshness window dedupes the burst of mount refetches a
+      // single navigation can trigger (level + progress + leaderboard). Live
+      // screens still poll via their own refetchInterval, and cross-tab changes
+      // force invalidation, so data stays fresh without duplicate requests.
+      staleTime: 15_000,
+      gcTime: 5 * 60_000,
     },
   },
 });

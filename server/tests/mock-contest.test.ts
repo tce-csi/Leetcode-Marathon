@@ -129,7 +129,7 @@ describe("Phase 4: Final Mock Contest Validation", () => {
   let student1Id: string;
 
   let student2Cookies: string[] = [];
-  let _student2Csrf = "";
+  let student2Csrf = "";
   let student2Id: string;
 
   let y1Levels: any[] = [];
@@ -158,6 +158,15 @@ describe("Phase 4: Final Mock Contest Validation", () => {
     student1Cookies = auth.cookies;
     student1Csrf = auth.csrf;
     expect(student1Cookies.length).toBeGreaterThan(0);
+
+    // Start the personal contest timer (gates challenge access).
+    const start1 = await request(app)
+      .post("/api/student/contest/start")
+      .set("Cookie", student1Cookies)
+      .set("x-csrf-token", student1Csrf)
+      .expect(200);
+    expect(start1.body.data.startedAt).toBeTruthy();
+    expect(start1.body.data.alreadyStarted).toBe(false);
   });
 
   it("Step 2: Registers Second-Year test student", async () => {
@@ -181,8 +190,15 @@ describe("Phase 4: Final Mock Contest Validation", () => {
 
     const auth = extractCookies(res);
     student2Cookies = auth.cookies;
-    _student2Csrf = auth.csrf;
+    student2Csrf = auth.csrf;
     expect(student2Cookies.length).toBeGreaterThan(0);
+
+    // Start the personal contest timer for the second-year student too.
+    await request(app)
+      .post("/api/student/contest/start")
+      .set("Cookie", student2Cookies)
+      .set("x-csrf-token", student2Csrf)
+      .expect(200);
   });
 
   it("Step 3: Confirms track assignments stored in PostgreSQL", async () => {
@@ -368,7 +384,10 @@ describe("Phase 4: Final Mock Contest Validation", () => {
 
   it("Step 11: Confirms score updates once and leaderboard reflects changes", async () => {
     // Year 1 leaderboard
-    const lb1Res = await request(app).get("/api/leaderboard?year=1").expect(200);
+    const lb1Res = await request(app)
+      .get("/api/leaderboard?year=1")
+      .set("Cookie", adminCookies)
+      .expect(200);
     expect(lb1Res.body.ok).toBe(true);
     const entries1 = lb1Res.body.data.entries;
     expect(entries1.length).toBeGreaterThan(0);
@@ -379,7 +398,10 @@ describe("Phase 4: Final Mock Contest Validation", () => {
     expect(student1Entry.totalPoints).toBeGreaterThan(0);
 
     // Year 2 leaderboard should NOT show Student 1 and should show Student 2 with 0 levels completed
-    const lb2Res = await request(app).get("/api/leaderboard?year=2").expect(200);
+    const lb2Res = await request(app)
+      .get("/api/leaderboard?year=2")
+      .set("Cookie", adminCookies)
+      .expect(200);
     expect(lb2Res.body.ok).toBe(true);
     const entries2 = lb2Res.body.data.entries;
     const inYear2 = entries2.find((e: any) => e.studentId === student1Id);
@@ -442,6 +464,17 @@ describe("Phase 4: Final Mock Contest Validation", () => {
     await request(app)
       .get("/api/admin/submissions")
       .set("Cookie", student2Cookies)
+      .expect(401);
+  });
+
+  it("Step 14b: Confirms the leaderboard is admin-only and students are blocked", async () => {
+    await request(app)
+      .get("/api/leaderboard?year=1")
+      .set("Cookie", student1Cookies)
+      .expect(401);
+
+    await request(app)
+      .get("/api/leaderboard?year=1")
       .expect(401);
   });
 

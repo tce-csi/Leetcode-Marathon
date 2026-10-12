@@ -112,6 +112,13 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
     const auth = extractCookies(regRes);
     studentCookie = auth.cookies;
     studentCsrf = auth.csrf;
+
+    // The personal contest timer gates challenge access.
+    await request(app)
+      .post("/api/student/contest/start")
+      .set("Cookie", studentCookie)
+      .set("x-csrf-token", studentCsrf)
+      .expect(200);
   });
 
   it("Level 1 starts UNLOCKED and Level 2 starts LOCKED", async () => {
@@ -149,7 +156,7 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
       .set("x-csrf-token", studentCsrf)
       .send({
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/123456/",
+        submissionUrl: "https://leetcode.com/submissions/detail/123456/",
         sourceCode: "def two_sum(): pass",
         programmingLanguage: "python",
       })
@@ -183,7 +190,7 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
       .set("x-csrf-token", studentCsrf)
       .send({
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/123456/",
+        submissionUrl: "https://leetcode.com/submissions/detail/123456/",
         sourceCode: "def two_sum(): pass",
         programmingLanguage: "python",
       })
@@ -207,7 +214,7 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
       .set("x-csrf-token", studentCsrf)
       .send({
         levelId: level2,
-        submissionUrl: "https://leetcode.com/problems/reverse-integer/submissions/234567/",
+        submissionUrl: "https://leetcode.com/submissions/detail/234567/",
         sourceCode: "def reverse(): pass",
         programmingLanguage: "python",
       })
@@ -225,9 +232,16 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
     expect(levels[2].status).toBe("UNLOCKED");
   });
 
-  it("Leaderboard reflects marathon progress while keeping unverified scores at 0", async () => {
+  it("Leaderboard reflects marathon progress while keeping unverified scores at 0 (admin only)", async () => {
+    const adminLoginRes = await request(app)
+      .post("/api/auth/admin/login")
+      .send({ email: "admin-prog@tce.edu", password: "admin-password" })
+      .expect(200);
+    const { cookies: adminCookies } = extractCookies(adminLoginRes);
+
     const lbRes = await request(app)
       .get("/api/leaderboard?year=1")
+      .set("Cookie", adminCookies)
       .expect(200);
 
     expect(lbRes.body.ok).toBe(true);
@@ -275,7 +289,10 @@ describe("CODEQUEST — Automatic Level Progression & Separation of Verification
     expect(reviewRes.body.data.submission.status).toBe("VERIFIED");
 
     // Verified points are now awarded (100 pts for level 1)
-    const lbRes = await request(app).get("/api/leaderboard?year=1").expect(200);
+    const lbRes = await request(app)
+      .get("/api/leaderboard?year=1")
+      .set("Cookie", adminCookies)
+      .expect(200);
     const entry = lbRes.body.data.entries.find(
       (e: { studentId: string }) => e.studentId === studentId,
     );

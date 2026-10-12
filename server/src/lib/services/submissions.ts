@@ -2,14 +2,22 @@ import { writeAudit } from "@/lib/audit";
 import { getDb } from "@/lib/db";
 import type { Db } from "@/lib/db/types";
 import { errors } from "@/lib/errors";
+import {
+  LEETCODE_SUBMISSION_URL_MESSAGE,
+  parseLeetcodeSubmissionDetailUrl,
+} from "@/lib/normalize";
 import { isValidEvidencePath } from "@/lib/storage";
-import { getContestById, isWithinContestWindowWithGrace } from "@/lib/services/contest";
+import { isWithinContestWindowWithGrace } from "@/lib/services/contest";
 import {
   detectDuplicateSubmissionUrl,
   detectOutsideWindow,
   detectRepeatedRejections,
 } from "@/lib/services/flags";
-import { evaluateLevelCompletion, getLevelContext, getNextLevel } from "@/lib/services/progression";
+import {
+  evaluateLevelCompletion,
+  getLevelContext,
+  nextRoadmapLevel,
+} from "@/lib/services/progression";
 import type {
   CodingSubmissionRow,
   LevelRow,
@@ -26,6 +34,7 @@ import type { AdminReviewStateInput, SubmissionInput } from "@/lib/validation/su
 export interface CodingSubmissionResult extends CodingSubmissionRow {
   nextLevel?: RoadmapLevel | null;
   completed?: boolean;
+  totalLevels?: number;
 }
 
 export interface SubmissionContext {
@@ -34,23 +43,11 @@ export interface SubmissionContext {
 }
 
 function assertLeetCodeSubmissionUrl(value: string | undefined): string {
-  if (!value || !value.trim()) {
-    throw errors.badRequest("LeetCode submission URL is required.");
+  const parsed = parseLeetcodeSubmissionDetailUrl(value);
+  if (!parsed) {
+    throw errors.badRequest(LEETCODE_SUBMISSION_URL_MESSAGE);
   }
-  let parsed: URL;
-  try {
-    parsed = new URL(value.trim());
-  } catch {
-    throw errors.badRequest("Submission URL is not a valid URL.");
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw errors.badRequest("Submission URL must use http or https.");
-  }
-  const host = parsed.hostname.toLowerCase();
-  if (host !== "leetcode.com" && !host.endsWith(".leetcode.com")) {
-    throw errors.badRequest("Submission URL must be from leetcode.com.");
-  }
-  return parsed.toString();
+  return parsed.url;
 }
 
 export async function createSubmission(
@@ -74,8 +71,8 @@ export async function createSubmission(
   const codeFileName = input.codeFileName?.trim() || null;
 
   return db.transaction(async (tx) => {
-    const { level, problem, progress } = await getLevelContext(student, input.levelId, tx);
-    const contest = await getContestById(student.contest_id, tx);
+    const { level, problem, progress, contest, trackLevels, totalLevels, activeSubmission } =
+      await getLevelContext(student, input.levelId, tx);
     if (!contest) throw errors.notFound("Contest not found.");
 
     const now = new Date();
@@ -83,32 +80,43 @@ export async function createSubmission(
       throw errors.forbidden("The contest submission window has closed.");
     }
 
-    // Check if level already has an active (non-rejected) submission
-    const existingActive = await tx.query<CodingSubmissionRow>(
-      `select * from coding_submissions
-        where student_id = $1 and level_id = $2 and status <> 'REJECTED'
-        order by created_at desc limit 1`,
-      [student.id, input.levelId],
+    // A finalized contest is frozen: the attempt has been submitted for review
+    // and no further submissions may change it. Lock the student row so a
+    // concurrent finalize cannot race past this check.
+    const lockedStudent = await tx.query<Pick<StudentRow, "finalized_at">>(
+      "select finalized_at from students where id = $1 for update",
+      [student.id],
     );
-
-    if (existingActive.rows.length > 0) {
-      const existing = existingActive.rows[0]!;
-      if (existing.status === "VERIFIED") {
-        throw errors.conflict("This level has already been verified.");
-      }
-      // Idempotent retry: ensure progression completed and return with next level
-      await evaluateLevelCompletion(tx, student, level);
-      const nextLevel = await getNextLevel(tx, student.id, level);
-      return Object.assign(existing, { nextLevel, completed: true });
+    if (lockedStudent.rows[0]?.finalized_at) {
+      throw errors.conflict(
+        "This contest has been submitted for review and can no longer be changed.",
+      );
     }
 
-    // Count existing attempts for attempt_number (all statuses preserved for audit)
-    const attemptCountResult = await tx.query<{ count: number }>(
-      `select count(*)::int as count from coding_submissions
-        where student_id = $1 and level_id = $2`,
-      [student.id, input.levelId],
-    );
-    const attemptNumber = (attemptCountResult.rows[0]?.count ?? 0) + 1;
+    // Strict one-submission policy: a level is locked by its active (non-rejected)
+    // submission. An identical report is an idempotent retry; changed evidence is
+    // rejected because each level accepts exactly one submission. Rejected rows
+    // never lock the level (the DB trigger keeps `is_official` in sync), so a
+    // fresh attempt after a rejection flows past this check.
+    if (activeSubmission) {
+      const existing = activeSubmission;
+      const sameUrl = (existing.submission_url ?? "").trim() === submissionUrl.trim();
+      const sameCode = (existing.source_code ?? "").trim() === sourceCode;
+      if (sameUrl && sameCode) {
+        // Idempotent retry: ensure progression completed and return with next level
+        const completed = await evaluateLevelCompletion(tx, student, level, {
+          trackTotalLevels: totalLevels,
+          trackCompletedLevels: trackLevels.filter(
+            (t) => t.progress_status === "COMPLETED" && t.id !== level.id,
+          ).length,
+        });
+        const nextLevel = completed ? nextRoadmapLevel(trackLevels, level) : null;
+        return Object.assign(existing, { nextLevel, completed, totalLevels });
+      }
+      throw errors.conflict(
+        "This level already has a solution submitted for review. Each level accepts exactly one submission.",
+      );
+    }
 
     const outcome = await verifySubmission(
       student,
@@ -132,34 +140,52 @@ export async function createSubmission(
     const verifiedAt = status === "VERIFIED" ? now.toISOString() : null;
 
     // Always INSERT a new row in tx to preserve the complete attempt history for audit purposes.
-    const inserted = await tx.query<CodingSubmissionRow>(
-      `insert into coding_submissions
-         (student_id, level_id, problem_id, status, verification_source, submission_url,
-          screenshot_path, student_note, problem_slug, verdict, reported_solved_at,
-          verified_solved_at, verified_at, attempt_number, source_code,
-          programming_language, code_file_name)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, $12, $13, $14, $15, $16)
-       returning *`,
-      [
-        student.id,
-        input.levelId,
-        problem?.id ?? null,
-        status,
-        isAutomatic ? "AUTOMATIC" : "MANUAL",
-        submissionUrl,
-        screenshotPath,
-        note,
-        problem?.problem_slug ?? null,
-        outcome.verdict ?? null,
-        verifiedSolvedAt,
-        verifiedAt,
-        attemptNumber,
-        sourceCode,
-        programmingLanguage,
-        codeFileName,
-      ],
-    );
+    // attempt_number is computed inside the statement so no separate COUNT round trip is needed.
+    // `is_official` is derived from status by the database trigger on INSERT.
+    let inserted;
+    try {
+      inserted = await tx.query<CodingSubmissionRow>(
+        `insert into coding_submissions
+           (student_id, level_id, problem_id, status, verification_source, submission_url,
+            screenshot_path, student_note, problem_slug, verdict, reported_solved_at,
+            verified_solved_at, verified_at, attempt_number, source_code,
+            programming_language, code_file_name)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, $12,
+                 (select coalesce(count(*), 0) + 1 from coding_submissions sub
+                   where sub.student_id = $1 and sub.level_id = $2),
+                 $13, $14, $15)
+         returning *`,
+        [
+          student.id,
+          input.levelId,
+          problem?.id ?? null,
+          status,
+          isAutomatic ? "AUTOMATIC" : "MANUAL",
+          submissionUrl,
+          screenshotPath,
+          note,
+          problem?.problem_slug ?? null,
+          outcome.verdict ?? null,
+          verifiedSolvedAt,
+          verifiedAt,
+          sourceCode,
+          programmingLanguage,
+          codeFileName,
+        ],
+      );
+    } catch (error) {
+      // Race guard: a concurrent request slipped an official row in between our
+      // check and the INSERT. The partial unique index rejects it, so surface the
+      // same one-submission conflict instead of a bare database error.
+      if ((error as { code?: string }).code === "23505") {
+        throw errors.conflict(
+          "This level already has a solution submitted for review. Each level accepts exactly one submission.",
+        );
+      }
+      throw error;
+    }
     const saved = inserted.rows[0]!;
+    const attemptNumber = saved.attempt_number;
 
     await writeAudit(
       {
@@ -179,8 +205,17 @@ export async function createSubmission(
     let nextLevel: RoadmapLevel | null = null;
     let completed = false;
     if (status !== "REJECTED") {
-      completed = await evaluateLevelCompletion(tx, student, level);
-      nextLevel = await getNextLevel(tx, student.id, level);
+      // Hints skip re-querying the submission we just inserted: there is a
+      // non-rejected submission (this one) and its verified status is known.
+      completed = await evaluateLevelCompletion(tx, student, level, {
+        submissionSatisfied: true,
+        verifiedSubmissionSatisfied: status === "VERIFIED",
+        trackTotalLevels: totalLevels,
+        trackCompletedLevels: trackLevels.filter(
+          (t) => t.progress_status === "COMPLETED" && t.id !== level.id,
+        ).length,
+      });
+      nextLevel = completed ? nextRoadmapLevel(trackLevels, level) : null;
     }
 
     // Anti-cheating signals are recorded for organiser review only. They never
@@ -195,7 +230,7 @@ export async function createSubmission(
     );
     await detectOutsideWindow(contest, student.id, level.id, saved.id, tx);
 
-    return Object.assign(saved, { nextLevel, completed });
+    return Object.assign(saved, { nextLevel, completed, totalLevels });
   });
 }
 

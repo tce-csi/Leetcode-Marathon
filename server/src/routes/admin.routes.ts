@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { z } from "zod";
 import { requireAdmin } from "@/lib/auth/guard";
 import { requireAdminMutation } from "@/lib/auth/route-guard";
 import { writeAudit } from "@/lib/audit";
@@ -25,6 +26,7 @@ import { getTracks, requireCurrentContest, updateContest } from "@/lib/services/
 import { computeContestStatus } from "@/lib/services/contest";
 import { listFlags, resolveFlag } from "@/lib/services/flags";
 import { listStudents, getStudentProfile, type StudentListFilters } from "@/lib/services/students";
+import { updateAssessmentReviewNote } from "@/lib/services/assessments";
 import {
   listSubmissionsForReview,
   reviewSubmission,
@@ -278,8 +280,8 @@ adminRoutes.post(
   asyncHandler(async (req, res) => {
     const session = await requireAdminMutation(req);
     const body = levelCreateSchema.parse(req.body);
-    const level = await createLevel(session.admin.id, body);
-    ok(res, { level }, 201);
+    const result = await createLevel(session.admin.id, body);
+    ok(res, result, 201);
   }),
 );
 
@@ -319,8 +321,9 @@ adminRoutes.delete(
   asyncHandler(async (req, res) => {
     const session = await requireAdminMutation(req);
     const id = String(req.params.id ?? "");
-    await deleteLevel(session.admin.id, id);
-    ok(res, { deleted: true });
+    const force = req.query.force === "true" || req.query.force === "1";
+    const result = await deleteLevel(session.admin.id, id, { force });
+    ok(res, result);
   }),
 );
 
@@ -365,6 +368,21 @@ adminRoutes.delete(
     const id = String(req.params.id ?? "");
     await deleteQuestion(session.admin.id, id);
     ok(res, { deleted: true });
+  }),
+);
+
+// Records an admin review note on a quiz attempt without altering the
+// student's original answers (one-submission quizzes are immutable).
+adminRoutes.patch(
+  "/assessments/:attemptId/review",
+  asyncHandler(async (req, res) => {
+    const session = await requireAdminMutation(req);
+    const attemptId = String(req.params.attemptId ?? "");
+    const note = z
+      .object({ note: z.string().trim().max(2000).nullable().optional() })
+      .parse(req.body).note ?? null;
+    const attempt = await updateAssessmentReviewNote(session.admin.id, attemptId, note);
+    ok(res, { attempt });
   }),
 );
 
@@ -518,9 +536,10 @@ adminRoutes.get(
     const search = typeof req.query.search === "string" ? req.query.search : undefined;
     const sortBy = req.query.sortBy === "elapsed" ? "elapsed" : "finished_at";
     const verifiedOnly = req.query.verifiedOnly === "true";
+    const finalizedOnly = req.query.finalizedOnly === "true";
 
     const [finishers, stats] = await Promise.all([
-      listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly }),
+      listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly, finalizedOnly }),
       getFinisherStats(contest.id, year),
     ]);
 
@@ -539,8 +558,9 @@ adminRoutes.get(
     const search = typeof req.query.search === "string" ? req.query.search : undefined;
     const sortBy = req.query.sortBy === "elapsed" ? "elapsed" : "finished_at";
     const verifiedOnly = req.query.verifiedOnly === "true";
+    const finalizedOnly = req.query.finalizedOnly === "true";
 
-    const finishers = await listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly });
+    const finishers = await listFinishers(contest.id, { year, status, search, sortBy, verifiedOnly, finalizedOnly });
     const headers = [
       "Rank",
       "Roll Number",

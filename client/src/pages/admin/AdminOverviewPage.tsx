@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   ArrowRight,
@@ -19,6 +19,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { cn } from "@/lib/utils";
 import { formatRelative } from "@/lib/format";
 import type { AdminStats, AuditLogEntry } from "@/lib/services/admin";
@@ -36,12 +37,21 @@ export default function AdminOverviewPage() {
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api
       .get<OverviewResponse>("/api/admin/overview")
-      .then(setData)
+      .then((result) => {
+        setData(result);
+        setFailed(false);
+      })
       .catch(() => setFailed(true));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useAutoRefresh(load, 8000);
 
   if (failed) {
     return <EmptyState title="Unable to load the dashboard" description="Please refresh the page." />;

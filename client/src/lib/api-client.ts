@@ -1,4 +1,5 @@
 import axios, { type AxiosRequestConfig } from "axios";
+import { notifyDataChanged } from "@/lib/data-sync";
 
 export class ApiError extends Error {
   code: string;
@@ -98,6 +99,11 @@ async function request<T>(
         response.status,
         error?.details,
       );
+    }
+    // Successful mutations invalidate the relevant query groups (same-tab + every
+    // other open tab) so the UI updates without a manual refresh.
+    if (method !== "GET" && audience !== "none") {
+      notifyDataChanged(audience);
     }
     return payload.data;
   } catch (error) {

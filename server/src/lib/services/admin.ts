@@ -1,15 +1,20 @@
 import { writeAudit } from "@/lib/audit";
 import { getDb } from "@/lib/db";
 import type { Db } from "@/lib/db/types";
-import { errors } from "@/lib/errors";
+import { AppError, errors } from "@/lib/errors";
 import { extractLeetcodeSlug, isLeetcodeProblemUrl, normalizeName, normalizeRollNumber, parseLeetcodeProfileUrl } from "@/lib/normalize";
 import { randomIdempotencyKey } from "@/lib/auth/tokens";
 import { awardPoints } from "@/lib/services/scoring";
-import { requireCurrentContest } from "@/lib/services/contest";
+import { computeContestStatus, requireCurrentContest } from "@/lib/services/contest";
 import { flagIdentityChanged } from "@/lib/services/flags";
-import { resetStudentProgress, unlockNextLevel } from "@/lib/services/progression";
+import {
+  reconcileTrackProgression,
+  resetStudentProgress,
+  unlockNextLevel,
+} from "@/lib/services/progression";
 import type {
   ConceptualQuestionRow,
+  ContestRow,
   ContestTrackRow,
   LevelRow,
   LeetCodeProblemRow,
@@ -141,15 +146,15 @@ export async function setTrackActive(
 // Level management
 // ---------------------------------------------------------------------------
 
+// Level number and order are owned by the backend (see `renumberTrackLevels`)
+// and are deliberately not editable through the generic update path, so an
+// administrator can never create gaps, duplicates or cross-track moves.
 const LEVEL_COLUMNS: Record<string, string> = {
-  trackId: "track_id",
-  levelNumber: "level_number",
   title: "title",
   description: "description",
   teaser: "teaser",
   difficulty: "difficulty",
   points: "points",
-  orderIndex: "order_index",
   isActive: "is_active",
   isStarting: "is_starting",
   assessmentMode: "assessment_mode",
@@ -180,64 +185,269 @@ async function upsertProblem(
   return rows[0]!;
 }
 
+/**
+ * Reserved floor for archived level numbers. Archived rows keep their history
+ * but are parked far above the live 1..N range so the (track_id, level_number)
+ * unique constraint stays intact for every row.
+ */
+const LEVEL_ARCHIVE_BASE = 1_000_000;
+
+/**
+ * Serializes level-numbering changes for a track by taking a row lock for the
+ * duration of the transaction. Concurrent create/delete requests for the same
+ * track therefore cannot allocate the same position.
+ */
+async function lockTrackForUpdate(tx: Db, trackId: string): Promise<ContestTrackRow> {
+  const { rows } = await tx.query<ContestTrackRow>(
+    "select * from contest_tracks where id = $1 for update",
+    [trackId],
+  );
+  const track = rows[0];
+  if (!track) throw errors.notFound("Track not found.");
+  return track;
+}
+
+/**
+ * Renumbers the live (non-archived) levels of a track to a contiguous 1..N
+ * sequence following the official order (order_index, then level_number), and
+ * normalizes order_index to match. Runs in two phases so the immediate
+ * (track_id, level_number) unique constraint can never observe a transient
+ * collision during the shuffle. Callers must already hold the track lock.
+ */
+async function renumberTrackLevels(tx: Db, trackId: string): Promise<number> {
+  const { rows } = await tx.query<{ id: string }>(
+    `select id from levels
+      where track_id = $1 and archived_at is null
+      order by order_index asc, level_number asc`,
+    [trackId],
+  );
+  if (rows.length === 0) return 0;
+
+  const maxResult = await tx.query<{ max: number | null }>(
+    "select max(level_number) as max from levels where track_id = $1 and archived_at is null",
+    [trackId],
+  );
+  const offset = Number(maxResult.rows[0]?.max ?? 0) + rows.length + 1;
+
+  // Phase 1: move every live number safely above the destination range.
+  await tx.query(
+    `update levels
+        set level_number = level_number + $2
+      where track_id = $1 and archived_at is null`,
+    [trackId, offset],
+  );
+
+  // Phase 2: assign the final contiguous numbers and normalized order.
+  for (const [index, row] of rows.entries()) {
+    const number = index + 1;
+    await tx.query("update levels set level_number = $2, order_index = $2 where id = $1", [
+      row.id,
+      number,
+    ]);
+  }
+  return rows.length;
+}
+
+/**
+ * Archives a level that has participant activity, preserving every historic
+ * record (submissions, source code, attempts, progress, audit). The row is
+ * moved to a reserved high number so the live sequence stays gap-free and the
+ * uniqueness constraint is never violated.
+ */
+async function archiveLevel(tx: Db, adminId: string, level: LevelRow): Promise<void> {
+  const { rows } = await tx.query<{ next: number }>(
+    `select greatest(coalesce(max(level_number), 0) + 1, $2)::int as next
+       from levels
+      where track_id = $1 and archived_at is not null`,
+    [level.track_id, LEVEL_ARCHIVE_BASE],
+  );
+  const archivedNumber = rows[0]!.next;
+  await tx.query(
+    `update levels
+        set archived_at = now(), archived_by = $2, is_active = false,
+            level_number = $3, order_index = $3
+      where id = $1`,
+    [level.id, adminId, archivedNumber],
+  );
+}
+
+async function levelActivityCounts(
+  tx: Db,
+  levelId: string,
+): Promise<{ submissions: number; attempts: number; progress: number; participants: number }> {
+  const { rows } = await tx.query<{
+    submissions: number;
+    attempts: number;
+    progress: number;
+    participants: number;
+  }>(
+    `select
+        (select count(*)::int from coding_submissions where level_id = $1) as submissions,
+        (select count(*)::int from assessment_attempts where level_id = $1) as attempts,
+        (select count(*)::int from student_level_progress where level_id = $1) as progress,
+        (select count(distinct student_id)::int from student_level_progress where level_id = $1) as participants`,
+    [levelId],
+  );
+  return rows[0]!;
+}
+
+export interface LevelChangeImpact {
+  contestStarted: boolean;
+  contestState: string;
+  participants: number;
+  submissions: number;
+  activeProgress: number;
+  requiresConfirmation: boolean;
+}
+
+/**
+ * Summarizes how a level change would affect a live contest. When the contest
+ * has already started and participants exist, an administrator must explicitly
+ * confirm the change before it is applied.
+ */
+async function getLevelChangeImpact(
+  tx: Db,
+  contestId: string,
+  trackId: string,
+): Promise<LevelChangeImpact> {
+  const { rows: contestRows } = await tx.query<ContestRow>(
+    "select * from contests where id = $1",
+    [contestId],
+  );
+  const contest = contestRows[0];
+  if (!contest) throw errors.notFound("Contest not found.");
+  const status = computeContestStatus(contest);
+  const contestStarted = status.contest === "LIVE" || status.contest === "ENDED";
+
+  const { rows } = await tx.query<{
+    participants: number;
+    submissions: number;
+    active_progress: number;
+  }>(
+    `select
+        (select count(*)::int from students where contest_id = $1) as participants,
+        (select count(*)::int from coding_submissions cs
+           join students s on s.id = cs.student_id
+          where s.contest_id = $1) as submissions,
+        (select count(*)::int from student_level_progress p
+           join levels l on l.id = p.level_id
+          where l.track_id = $2 and p.status <> 'LOCKED') as active_progress`,
+    [contestId, trackId],
+  );
+  const stats = rows[0]!;
+  return {
+    contestStarted,
+    contestState: status.contest,
+    participants: stats.participants,
+    submissions: stats.submissions,
+    activeProgress: stats.active_progress,
+    requiresConfirmation: contestStarted && stats.participants > 0,
+  };
+}
+
+function assertChangeConfirmed(impact: LevelChangeImpact, force: boolean, what: string): void {
+  if (impact.requiresConfirmation && !force) {
+    throw new AppError(
+      "LEVEL_CHANGE_CONFIRMATION_REQUIRED",
+      `This contest is ${impact.contestState.toLowerCase()} with ${impact.participants} registered participant(s). Confirm before you ${what}.`,
+      409,
+      impact,
+    );
+  }
+}
+
+export interface LevelMutationResult {
+  level: LevelRow;
+  levels: AdminLevelRow[];
+  totalLevels: number;
+}
+
+/**
+ * Creates a level at the end of its track. The level number and order are
+ * assigned by the backend from the track's current live levels; any value the
+ * client may have submitted is ignored. Runs inside a transaction that locks
+ * the track so simultaneous requests cannot reuse a number.
+ */
 export async function createLevel(
   adminId: string,
   input: LevelCreateInput,
   db: Db = getDb(),
-): Promise<LevelRow> {
+): Promise<LevelMutationResult> {
   return db.transaction(async (tx) => {
-    const orderIndex = input.orderIndex ?? input.levelNumber;
-    let level: LevelRow;
-    try {
-      const inserted = await tx.query<LevelRow>(
-        `insert into levels
-           (track_id, level_number, title, description, difficulty, points, order_index,
-            is_active, is_starting, assessment_mode, require_assessment_pass, passing_score,
-            max_attempts, require_verified_submission)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-         returning *`,
-        [
-          input.trackId,
-          input.levelNumber,
-          input.title,
-          input.description ?? "",
-          input.difficulty ?? "EASY",
-          input.points ?? 10,
-          orderIndex,
-          input.isActive ?? true,
-          input.isStarting ?? false,
-          input.assessmentMode ?? "NONE",
-          input.requireAssessmentPass ?? false,
-          input.passingScore ?? 60,
-          input.maxAttempts ?? 3,
-          input.requireVerifiedSubmission ?? true,
-        ],
-      );
-      level = inserted.rows[0]!;
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "23505") {
-        throw errors.conflict("A level with that number already exists in this track.");
-      }
-      throw error;
-    }
+    const track = await lockTrackForUpdate(tx, input.trackId);
+    const impact = await getLevelChangeImpact(tx, track.contest_id, track.id);
+    assertChangeConfirmed(impact, input.force ?? false, "add a level to an active contest");
+
+    const position = await tx.query<{ next_number: number; next_order: number }>(
+      `select coalesce(max(level_number), 0) + 1 as next_number,
+              coalesce(max(order_index), 0) + 1 as next_order
+         from levels
+        where track_id = $1 and archived_at is null`,
+      [track.id],
+    );
+    const nextNumber = Number(position.rows[0]?.next_number ?? 1);
+    const nextOrder = Number(position.rows[0]?.next_order ?? 1);
+
+    const inserted = await tx.query<LevelRow>(
+      `insert into levels
+         (track_id, level_number, title, description, difficulty, points, order_index,
+          is_active, is_starting, assessment_mode, require_assessment_pass, passing_score,
+          max_attempts, require_verified_submission)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       returning *`,
+      [
+        track.id,
+        nextNumber,
+        input.title,
+        input.description ?? "",
+        input.difficulty ?? "EASY",
+        input.points ?? 10,
+        nextOrder,
+        input.isActive ?? true,
+        input.isStarting ?? false,
+        input.assessmentMode ?? "NONE",
+        input.requireAssessmentPass ?? false,
+        input.passingScore ?? 60,
+        input.maxAttempts ?? 3,
+        input.requireVerifiedSubmission ?? true,
+      ],
+    );
+    const level = inserted.rows[0]!;
     if (input.problem) await upsertProblem(tx, level.id, input.problem);
 
-    // Initialize progress record for all existing students in this track so dynamic levels appear seamlessly
+    // Seed a progress record for every student in this track so the new level
+    // appears seamlessly, then reconcile so eligible students are unlocked.
     await tx.query(
-      `insert into student_level_progress (student_id, level_id, status)
-       select s.id, $1, case when $3 = true then 'UNLOCKED' else 'LOCKED' end
+      `insert into student_level_progress (student_id, level_id, status, unlocked_at)
+       select s.id, $1,
+              case when $3 = true then 'UNLOCKED'::progress_status else 'LOCKED'::progress_status end,
+              case when $3 = true then now() else null end
          from students s
          join contest_tracks ct on ct.contest_id = s.contest_id and ct.year = s.year
         where ct.id = $2
        on conflict (student_id, level_id) do nothing`,
-      [level.id, input.trackId, Boolean(input.isStarting)],
+      [level.id, track.id, Boolean(input.isStarting)],
     );
+    await reconcileTrackProgression(tx, track.id);
 
     await writeAudit(
-      { actorType: "ADMIN", actorId: adminId, action: "level.create", entityType: "level", entityId: level.id },
+      {
+        actorType: "ADMIN",
+        actorId: adminId,
+        action: "level.create",
+        entityType: "level",
+        entityId: level.id,
+        metadata: { levelNumber: level.level_number, trackId: track.id },
+      },
       tx,
     );
-    return level;
+
+    const levels = await listLevelsDetailed(track.contest_id, tx);
+    return {
+      level,
+      levels,
+      totalLevels: levels.filter((l) => l.track_id === track.id).length,
+    };
   });
 }
 
@@ -270,14 +480,70 @@ export async function updateLevel(
   });
 }
 
-export async function deleteLevel(adminId: string, levelId: string, db: Db = getDb()): Promise<void> {
-  await db.transaction(async (tx) => {
-    const result = await tx.query("delete from levels where id = $1", [levelId]);
-    if (result.rowCount === 0) throw errors.notFound("Level not found.");
+export interface LevelDeleteResult {
+  deleted: true;
+  archived: boolean;
+  levels: AdminLevelRow[];
+  totalLevels: number;
+  impact: LevelChangeImpact;
+}
+
+/**
+ * Removes a level from its track and renumbers the remaining levels so the
+ * sequence stays contiguous. A level with participant activity is archived
+ * (soft-deleted) rather than hard-deleted so historic submissions, source code,
+ * progress and audit records survive. Hard deletion is used only when the level
+ * has no related records at all.
+ */
+export async function deleteLevel(
+  adminId: string,
+  levelId: string,
+  options: { force?: boolean } = {},
+  db: Db = getDb(),
+): Promise<LevelDeleteResult> {
+  return db.transaction(async (tx) => {
+    const levelRes = await tx.query<LevelRow>("select * from levels where id = $1", [levelId]);
+    const level = levelRes.rows[0];
+    if (!level || level.archived_at) throw errors.notFound("Level not found.");
+
+    // Lock the track first (same order as createLevel) to serialize numbering.
+    const track = await lockTrackForUpdate(tx, level.track_id);
+    const impact = await getLevelChangeImpact(tx, track.contest_id, track.id);
+    assertChangeConfirmed(impact, options.force ?? false, "delete a level from an active contest");
+
+    const activity = await levelActivityCounts(tx, levelId);
+    const hasActivity =
+      activity.submissions > 0 || activity.attempts > 0 || activity.progress > 0;
+
+    if (hasActivity) {
+      await archiveLevel(tx, adminId, level);
+    } else {
+      const deleted = await tx.query("delete from levels where id = $1", [levelId]);
+      if (deleted.rowCount === 0) throw errors.notFound("Level not found.");
+    }
+
+    await renumberTrackLevels(tx, track.id);
+
     await writeAudit(
-      { actorType: "ADMIN", actorId: adminId, action: "level.delete", entityType: "level", entityId: levelId },
+      {
+        actorType: "ADMIN",
+        actorId: adminId,
+        action: hasActivity ? "level.archive" : "level.delete",
+        entityType: "level",
+        entityId: levelId,
+        metadata: { trackId: track.id, archived: hasActivity, title: level.title, activity },
+      },
       tx,
     );
+
+    const levels = await listLevelsDetailed(track.contest_id, tx);
+    return {
+      deleted: true,
+      archived: hasActivity,
+      levels,
+      totalLevels: levels.filter((l) => l.track_id === track.id).length,
+      impact,
+    };
   });
 }
 
@@ -288,12 +554,15 @@ export async function reorderLevels(
   db: Db = getDb(),
 ): Promise<void> {
   await db.transaction(async (tx) => {
+    await lockTrackForUpdate(tx, trackId);
     for (const item of order) {
       await tx.query(
-        "update levels set order_index = $2 where id = $1 and track_id = $3",
+        "update levels set order_index = $2 where id = $1 and track_id = $3 and archived_at is null",
         [item.id, item.orderIndex, trackId],
       );
     }
+    // Keep the publicly visible level numbers aligned with the new order.
+    await renumberTrackLevels(tx, trackId);
     await writeAudit(
       { actorType: "ADMIN", actorId: adminId, action: "level.reorder", entityType: "track", entityId: trackId },
       tx,
@@ -313,8 +582,8 @@ export async function createQuestion(
   return db.transaction(async (tx) => {
     const inserted = await tx.query<ConceptualQuestionRow>(
       `insert into conceptual_questions
-         (level_id, question_text, question_type, phase, order_index, points, correct_text, explanation, is_active, variant_group)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         (level_id, question_text, question_type, phase, order_index, points, correct_text, explanation, is_active, variant_group, min_length, max_length)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        returning *`,
       [
         input.levelId,
@@ -327,6 +596,8 @@ export async function createQuestion(
         input.explanation ?? "",
         input.isActive ?? true,
         input.variantGroup || null,
+        input.minLength ?? null,
+        input.maxLength ?? null,
       ],
     );
     const question = inserted.rows[0]!;
@@ -357,6 +628,8 @@ export async function updateQuestion(
       explanation: "explanation",
       isActive: "is_active",
       variantGroup: "variant_group",
+      minLength: "min_length",
+      maxLength: "max_length",
     };
     for (const [key, column] of Object.entries(map)) {
       const value = (input as Record<string, unknown>)[key];
@@ -680,7 +953,7 @@ export async function listLevelsDetailed(
        from levels l
        join contest_tracks t on t.id = l.track_id
        left join leetcode_problems p on p.level_id = l.id
-      where t.contest_id = $1
+      where t.contest_id = $1 and l.archived_at is null
       order by t.year asc, l.order_index asc, l.level_number asc`,
     [contestId],
   );

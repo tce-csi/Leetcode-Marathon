@@ -171,33 +171,21 @@ describe("track isolation and level locking", () => {
 });
 
 describe("conceptual assessment", () => {
-  it("unlocks the problem link after answering but requires a pass for completion", async () => {
+  it("a single submission unlocks the problem link and passes without further attempts", async () => {
     const { student } = await authenticateStudent("CS/01", "secret123", { db });
     const studentEntity = await studentRow(student.id);
 
-    const state = await getAssessmentState(studentEntity, (await getLevelContext(studentEntity, level1, db)).level, db);
-    expect(state.linkUnlocked).toBe(false);
-
-    const wrongOption = await db.query<{ id: string }>(
-      "select id from answer_options where option_text = 'Stack' limit 1",
-    );
-
-    const first = await submitAssessment(
+    const state = await getAssessmentState(
       studentEntity,
-      {
-        levelId: level1,
-        phase: "BEFORE",
-        answers: [{ questionId: state.phases[0]!.questions[0]!.id, selectedOptionIds: [wrongOption.rows[0]!.id] }],
-      },
+      (await getLevelContext(studentEntity, level1, db)).level,
       db,
     );
-    expect(first.passed).toBe(false);
-
-    const stateAfter = await getAssessmentState(studentEntity, (await getLevelContext(studentEntity, level1, db)).level, db);
-    expect(stateAfter.linkUnlocked).toBe(true);
+    expect(state.linkUnlocked).toBe(false);
+    expect(state.phases[0]!.maxAttempts).toBe(1);
+    expect(state.phases[0]!.attemptsUsed).toBe(0);
 
     const correct = await correctOptionId("Which structure?");
-    const second = await submitAssessment(
+    const first = await submitAssessment(
       studentEntity,
       {
         levelId: level1,
@@ -206,7 +194,67 @@ describe("conceptual assessment", () => {
       },
       db,
     );
-    expect(second.passed).toBe(true);
+    expect(first.passed).toBe(true);
+
+    const stateAfter = await getAssessmentState(
+      studentEntity,
+      (await getLevelContext(studentEntity, level1, db)).level,
+      db,
+    );
+    expect(stateAfter.linkUnlocked).toBe(true);
+    expect(stateAfter.phases[0]!.submitted).toBe(true);
+    expect(stateAfter.phases[0]!.attemptsUsed).toBe(1);
+    expect(stateAfter.phases[0]!.remainingAttempts).toBe(0);
+  });
+
+  it("returns the original result when the identical payload is submitted again", async () => {
+    const { student } = await authenticateStudent("CS/01", "secret123", { db });
+    const studentEntity = await studentRow(student.id);
+    const level = (await getLevelContext(studentEntity, level1, db)).level;
+    const state = await getAssessmentState(studentEntity, level, db);
+
+    const correct = await correctOptionId("Which structure?");
+    const retry = await submitAssessment(
+      studentEntity,
+      {
+        levelId: level1,
+        phase: "BEFORE",
+        answers: [{ questionId: state.phases[0]!.questions[0]!.id, selectedOptionIds: [correct] }],
+      },
+      db,
+    );
+    expect(retry.passed).toBe(true);
+    expect(retry.attemptId).toBe(state.phases[0]!.latestAttempt!.id);
+
+    const { rows } = await db.query<{ count: number }>(
+      "select count(*)::int as count from assessment_attempts where student_id = $1 and level_id = $2",
+      [student.id, level1],
+    );
+    expect(rows[0]!.count).toBe(1);
+  });
+
+  it("rejects a changed payload once the submission is locked in", async () => {
+    const { student } = await authenticateStudent("CS/01", "secret123", { db });
+    const studentEntity = await studentRow(student.id);
+    const level = (await getLevelContext(studentEntity, level1, db)).level;
+    const state = await getAssessmentState(studentEntity, level, db);
+
+    const wrongOption = await db.query<{ id: string }>(
+      "select id from answer_options where option_text = 'Stack' limit 1",
+    );
+    await expect(
+      submitAssessment(
+        studentEntity,
+        {
+          levelId: level1,
+          phase: "BEFORE",
+          answers: [
+            { questionId: state.phases[0]!.questions[0]!.id, selectedOptionIds: [wrongOption.rows[0]!.id] },
+          ],
+        },
+        db,
+      ),
+    ).rejects.toThrowError(/already been submitted and cannot be changed/i);
   });
 });
 
@@ -219,7 +267,7 @@ describe("submission review and unlocking", () => {
       studentEntity,
       {
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/1/",
+        submissionUrl: "https://leetcode.com/submissions/detail/1/",
         sourceCode: "def solution(): pass",
       },
       { db },
@@ -271,7 +319,7 @@ describe("submission review and unlocking", () => {
       studentEntity,
       {
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/101/",
+        submissionUrl: "https://leetcode.com/submissions/detail/101/",
         sourceCode: "def solution(): pass",
         note: "attempt 1",
       },
@@ -283,7 +331,7 @@ describe("submission review and unlocking", () => {
       studentEntity,
       {
         levelId: level1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/102/",
+        submissionUrl: "https://leetcode.com/submissions/detail/102/",
         sourceCode: "def solution(): pass",
         note: "attempt 2",
       },

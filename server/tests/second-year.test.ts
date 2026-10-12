@@ -334,7 +334,7 @@ describe("year access enforcement", () => {
       entity,
       {
         levelId: level2_1,
-        submissionUrl: "https://leetcode.com/problems/two-sum/submissions/1/",
+        submissionUrl: "https://leetcode.com/submissions/detail/1/",
         sourceCode: "def solution(): pass",
       },
       { db },

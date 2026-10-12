@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ScrollText } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -6,18 +6,25 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { api } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { formatDate, formatRelative } from "@/lib/format";
 import type { AuditLogEntry } from "@/lib/services/admin";
 
 export default function AdminAuditPage() {
   const [logs, setLogs] = useState<AuditLogEntry[] | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api
       .get<{ logs: AuditLogEntry[] }>("/api/admin/audit?limit=150")
       .then((data) => setLogs(data.logs))
       .catch(() => setLogs([]));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useAutoRefresh(load, 8000);
 
   return (
     <div className="space-y-6">

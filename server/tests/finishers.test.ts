@@ -1,5 +1,5 @@
 /**
- * Phase 7 — Finisher Rankings, Mandatory Source Code & Finalist Verification
+ * Phase 7 ï¿½ Finisher Rankings, Mandatory Source Code & Finalist Verification
  *
  * Tests cover:
  *  1. Rejection of submissions missing submissionUrl or sourceCode.
@@ -50,7 +50,7 @@ async function freshStudent(id: string) {
 function validSubmission(levelId: string, suffix = "") {
   return {
     levelId,
-    submissionUrl: `https://leetcode.com/problems/two-sum/submissions/${Date.now()}${suffix}/`,
+    submissionUrl: `https://leetcode.com/submissions/detail/${Date.now()}${suffix}/`,
     sourceCode: "def solution(nums, target): return [0, 1]",
     programmingLanguage: "python",
   };
@@ -132,7 +132,7 @@ describe("mandatory submission fields", () => {
     await expect(
       createSubmission(
         student,
-        { levelId: y1Level1, submissionUrl: "https://leetcode.com/problems/two-sum/submissions/9001/" } as any,
+        { levelId: y1Level1, submissionUrl: "https://leetcode.com/submissions/detail/9001/" } as any,
         { db },
       ),
     ).rejects.toSatisfy((e: any) => e.statusCode === 400 || /source/i.test(e.message));
@@ -143,7 +143,7 @@ describe("mandatory submission fields", () => {
     const student = await freshStudent(studentId);
     await initializeStudentProgress(db, student);
 
-    const sub = await createSubmission(student, validSubmission(y1Level1, "A"), { db });
+const sub = await createSubmission(student, validSubmission(y1Level1, "0"), { db });
     expect(sub.id).toBeTruthy();
     expect(sub.status).toBe("PENDING_REVIEW");
     expect(sub.source_code).toBeTruthy();
@@ -172,7 +172,7 @@ describe("auto-finish detection", () => {
 
   it("finished_at remains null after completing only Level 1 of 2", async () => {
     const student = await freshStudent(finisherStudentId);
-    await createSubmission(student, validSubmission(y1Level1, "B"), { db });
+    await createSubmission(student, validSubmission(y1Level1, "1"), { db });
     const row = await freshStudent(finisherStudentId);
     expect(row.finished_at).toBeNull();
   });
@@ -185,7 +185,7 @@ describe("auto-finish detection", () => {
       [finisherStudentId, y1Level2],
     );
     const student = await freshStudent(finisherStudentId);
-    await createSubmission(student, validSubmission(y1Level2, "C"), { db });
+    await createSubmission(student, validSubmission(y1Level2, "2"), { db });
 
     const row = await freshStudent(finisherStudentId);
     expect(row.finished_at).not.toBeNull();

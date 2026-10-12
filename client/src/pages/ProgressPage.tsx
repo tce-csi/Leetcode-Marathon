@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Award, CheckCircle2, ExternalLink, FileText, Target, Trophy } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
+import { PersonalContestCard } from "@/components/personal-contest-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +10,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { Progress } from "@/components/ui/progress";
 import { Tabs } from "@/components/ui/tabs";
-import { api } from "@/lib/api-client";
+import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { cn } from "@/lib/utils";
 import { formatDate, progressMeta, submissionMeta } from "@/lib/format";
 import type { ProgressSummary } from "@/lib/services/progression";
@@ -24,26 +26,54 @@ interface ProgressResponse {
   submissions: CodingSubmissionRow[];
   rank: number | null;
   contest: { name: string; endAt: string | null; timezone: string };
+  serverTime: string;
 }
 
 export default function ProgressPage() {
   const [data, setData] = useState<ProgressResponse | null>(null);
   const [tab, setTab] = useState("levels");
   const [failed, setFailed] = useState(false);
+  const [needsStart, setNeedsStart] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api
       .get<ProgressResponse>("/api/student/progress")
-      .then(setData)
-      .catch(() => setFailed(true));
+      .then((result) => {
+        setData(result);
+        setFailed(false);
+        setNeedsStart(false);
+      })
+      .catch((error) => {
+        // GET /progress is gated until the personal timer is started (403).
+        setNeedsStart(isApiError(error) && error.status === 403);
+        setFailed(true);
+      });
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useAutoRefresh(load, 12000);
 
   if (failed) {
     return (
       <div className="flex min-h-dvh flex-col">
         <SiteHeader />
         <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6">
-          <EmptyState title="We couldn't load your progress" description="Please refresh the page." />
+          {needsStart ? (
+            <EmptyState
+              title="Start your contest to see progress"
+              description="Your personal timer hasn't started yet. Begin it from the dashboard to unlock your progress."
+              action={
+                <Link to="/dashboard">
+                  <Button variant="secondary">Go to dashboard</Button>
+                </Link>
+              }
+            />
+          ) : (
+            <EmptyState title="We couldn't load your progress" description="Please refresh the page." />
+          )}
         </main>
       </div>
     );
@@ -60,7 +90,7 @@ export default function ProgressPage() {
     );
   }
 
-  const { student, summary, levels, submissions, rank, contest } = data;
+  const { student, summary, levels, submissions, rank, contest, serverTime } = data;
   const verified = submissions.filter((s) => s.status === "VERIFIED").length;
 
   return (
@@ -74,6 +104,12 @@ export default function ProgressPage() {
             {student.full_name} · {student.roll_number}
           </p>
         </header>
+
+        <PersonalContestCard
+          startedAt={student.started_at}
+          finalizedAt={summary.finalizedAt}
+          serverTime={serverTime}
+        />
 
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Metric icon={<Trophy className="size-5" />} label="Points" value={summary.totalPoints} tone="accent" />

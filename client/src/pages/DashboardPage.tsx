@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
+import { FinalizeContestCard } from "@/components/finalize-contest-card";
+import { PersonalContestCard } from "@/components/personal-contest-card";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { difficultyMeta, formatDate, formatISTTime, progressMeta, yearLabel } from "@/lib/format";
@@ -28,6 +30,8 @@ interface RoadmapResponse {
   status: ContestStatus;
   levels: RoadmapLevel[];
   summary: ProgressSummary;
+  /** Server clock used to anchor the live personal timer. */
+  serverTime: string;
 }
 
 function statusBadge(level: RoadmapLevel): { label: string; className: string } {
@@ -57,7 +61,9 @@ export default function DashboardPage() {
 
   if (isLoading || !data) return <PageLoader label="Loading your contest" />;
 
-  const { student, summary, levels, contest, status } = data;
+  const { student, summary, levels, contest, status, serverTime } = data;
+
+  const contestStarted = Boolean(student.started_at);
 
   const currentLevel =
     levels.find((level) => level.status === "IN_PROGRESS") ??
@@ -115,10 +121,24 @@ export default function DashboardPage() {
         </dl>
       </Card>
 
+      {/* Personal contest timer */}
+      <PersonalContestCard
+        startedAt={student.started_at}
+        finalizedAt={summary.finalizedAt}
+        serverTime={serverTime}
+      />
+
       {/* Current challenge */}
       <section className="space-y-3">
         <h2 className="text-lg font-semibold tracking-tight">Your current challenge</h2>
-        {allCompleted ? (
+        {!contestStarted ? (
+          <EmptyState
+            icon={<Lock className="size-5" />}
+            title="Challenges are locked"
+            description="Start your personal contest timer above to unlock your first challenge."
+          />
+        ) : allCompleted ? (
+          <div className="space-y-3">
           <Card className="border-foreground bg-surface-1 p-6 space-y-4">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-3">
@@ -158,6 +178,8 @@ export default function DashboardPage() {
               </p>
             </div>
           </Card>
+          <FinalizeContestCard allCompleted={allCompleted} finalizedAt={summary.finalizedAt} />
+          </div>
         ) : currentLevel ? (
           <Card className="border-foreground/30 p-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -210,7 +232,7 @@ export default function DashboardPage() {
         ) : (
           <Card className="divide-y divide-border overflow-hidden">
             {levels.map((level) => (
-              <LevelRow key={level.id} level={level} />
+              <LevelRow key={level.id} level={level} contestStarted={contestStarted} />
             ))}
           </Card>
         )}
@@ -238,10 +260,10 @@ function Detail({
   );
 }
 
-function LevelRow({ level }: { level: RoadmapLevel }) {
-  const locked = level.status === "LOCKED";
+function LevelRow({ level, contestStarted }: { level: RoadmapLevel; contestStarted: boolean }) {
+  const locked = level.status === "LOCKED" || !contestStarted;
   const completed = level.status === "COMPLETED";
-  const badge = statusBadge(level);
+  const badge = contestStarted ? statusBadge(level) : { label: "Locked", className: progressMeta.LOCKED.className };
 
   const row = (
     <div

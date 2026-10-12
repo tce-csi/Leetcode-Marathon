@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, ListChecks, Pencil, Plus, Star, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, ListChecks, Pencil, Plus, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -15,6 +15,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { difficultyMeta } from "@/lib/format";
 import type { AdminLevelRow } from "@/lib/services/admin";
 import type { ContestRow, ContestTrackRow } from "@/lib/types";
@@ -25,12 +26,69 @@ interface LevelsResponse {
   contest: ContestRow;
 }
 
+interface LevelMutationResponse {
+  level: AdminLevelRow;
+  levels: AdminLevelRow[];
+  totalLevels: number;
+}
+
+interface LevelDeleteResponse {
+  deleted: true;
+  archived: boolean;
+  levels: AdminLevelRow[];
+  totalLevels: number;
+}
+
+interface LevelImpact {
+  contestStarted: boolean;
+  contestState: string;
+  participants: number;
+  submissions: number;
+  activeProgress: number;
+  requiresConfirmation: boolean;
+}
+
+function isConfirmationRequired(error: unknown): error is { code: string; details?: LevelImpact } {
+  return isApiError(error) && error.code === "LEVEL_CHANGE_CONFIRMATION_REQUIRED";
+}
+
+function ImpactSummary({ impact }: { impact: LevelImpact }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-2/40 p-3">
+        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
+        <p className="text-sm text-muted">
+          This contest is <span className="font-medium text-foreground">{impact.contestState.toLowerCase()}</span> with{" "}
+          <span className="font-medium text-foreground">{impact.participants}</span> registered participant
+          {impact.participants === 1 ? "" : "s"}. Changing the question set now affects their competition.
+        </p>
+      </div>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <div className="rounded-lg border border-border px-3 py-2">
+          <dt className="text-xs text-muted">Submissions</dt>
+          <dd className="font-semibold">{impact.submissions}</dd>
+        </div>
+        <div className="rounded-lg border border-border px-3 py-2">
+          <dt className="text-xs text-muted">Levels in progress</dt>
+          <dd className="font-semibold">{impact.activeProgress}</dd>
+        </div>
+      </dl>
+      <p className="text-xs text-muted">
+        Existing submissions, source code, completion timestamps and finisher results are preserved.
+      </p>
+    </div>
+  );
+}
+
 export default function AdminLevelsPage() {
   const [data, setData] = useState<LevelsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toDelete, setToDelete] = useState<AdminLevelRow | null>(null);
+  const [deleteImpact, setDeleteImpact] = useState<LevelImpact | null>(null);
+  const [pendingCreate, setPendingCreate] = useState<LevelFormValues | null>(null);
+  const [createImpact, setCreateImpact] = useState<LevelImpact | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -47,30 +105,72 @@ export default function AdminLevelsPage() {
     load();
   }, [load]);
 
-  const handleCreate = async (values: LevelFormValues) => {
+  // Silent background refresh so admin changes elsewhere show up without a reload.
+  const refresh = useCallback(async () => {
+    try {
+      const result = await api.get<LevelsResponse>("/api/admin/levels");
+      setData(result);
+    } catch {
+      // transient background failures keep the last good data
+    }
+  }, []);
+
+  useAutoRefresh(refresh, 8000);
+
+  // Applies the authoritative level order returned by a create/delete mutation,
+  // so the list, numbering and totals update immediately without a page refresh.
+  const applyLevels = useCallback((levels: AdminLevelRow[]) => {
+    setData((prev) => (prev ? { ...prev, levels } : prev));
+  }, []);
+
+  const handleCreate = async (values: LevelFormValues, force = false) => {
     setBusy(true);
     try {
-      await api.post("/api/admin/levels", values);
-      toast.success("Level created.");
+      const result = await api.post<LevelMutationResponse>("/api/admin/levels", { ...values, force });
+      applyLevels(result.levels);
+      toast.success(`Level created as level ${result.level.level_number}.`);
       setShowCreate(false);
-      load();
+      setPendingCreate(null);
+      setCreateImpact(null);
     } catch (error) {
-      toast.error(isApiError(error) ? error.message : "Could not create the level.");
+      if (isConfirmationRequired(error)) {
+        setShowCreate(false);
+        setPendingCreate(values);
+        setCreateImpact(error.details ?? null);
+      } else {
+        toast.error(isApiError(error) ? error.message : "Could not create the level.");
+      }
     } finally {
       setBusy(false);
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = async (force = false) => {
     if (!toDelete) return;
     setBusy(true);
     try {
-      await api.del(`/api/admin/levels/${toDelete.id}`);
-      toast.success("Level deleted.");
+      const result = await api.del<LevelDeleteResponse>(
+        `/api/admin/levels/${toDelete.id}${force ? "?force=true" : ""}`,
+      );
+      applyLevels(result.levels);
+      toast.success(
+        result.archived
+          ? "Level removed. Student history was archived and preserved."
+          : "Level deleted.",
+      );
       setToDelete(null);
-      load();
+      setDeleteImpact(null);
     } catch (error) {
-      toast.error(isApiError(error) ? error.message : "Could not delete the level.");
+      if (isConfirmationRequired(error)) {
+        setDeleteImpact(error.details ?? null);
+      } else if (isApiError(error) && error.code === "NOT_FOUND") {
+        toast.error(error.message);
+        setToDelete(null);
+        setDeleteImpact(null);
+        load();
+      } else {
+        toast.error(isApiError(error) ? error.message : "Could not delete the level.");
+      }
     } finally {
       setBusy(false);
     }
@@ -127,7 +227,12 @@ export default function AdminLevelsPage() {
                     <ListChecks className="size-4 text-brand-soft" />
                     {track.name}
                   </CardTitle>
-                  <Badge variant="info">{track.year === 1 ? "1st Year" : "2nd Year"}</Badge>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="neutral">
+                      {trackLevels.length} level{trackLevels.length === 1 ? "" : "s"}
+                    </Badge>
+                    <Badge variant="info">{track.year === 1 ? "1st Year" : "2nd Year"}</Badge>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-2">
@@ -189,7 +294,10 @@ export default function AdminLevelsPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => setToDelete(level)}
+                            onClick={() => {
+                              setDeleteImpact(null);
+                              setToDelete(level);
+                            }}
                             aria-label="Delete level"
                           >
                             <Trash2 className="size-4 text-danger" />
@@ -217,30 +325,81 @@ export default function AdminLevelsPage() {
           initial={emptyLevelValues(data.tracks)}
           submitLabel="Create level"
           busy={busy}
-          onSubmit={handleCreate}
+          onSubmit={(values) => handleCreate(values)}
           onCancel={() => setShowCreate(false)}
         />
       </Dialog>
 
       <Dialog
-        open={Boolean(toDelete)}
-        onClose={() => setToDelete(null)}
-        title="Delete level"
-        description={toDelete ? `"${toDelete.title}" will be removed permanently.` : undefined}
+        open={Boolean(pendingCreate)}
+        onClose={() => {
+          setPendingCreate(null);
+          setCreateImpact(null);
+        }}
+        title="Confirm level change"
+        description="This change affects a running contest."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setToDelete(null)}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setPendingCreate(null);
+                setCreateImpact(null);
+              }}
+            >
               Cancel
             </Button>
-            <Button variant="danger" onClick={handleDelete} loading={busy}>
-              Delete
+            <Button
+              variant="danger"
+              loading={busy}
+              onClick={() => pendingCreate && handleCreate(pendingCreate, true)}
+            >
+              Add level anyway
             </Button>
           </>
         }
       >
-        <p className="text-sm text-muted">
-          All progress, questions and submissions tied to this level will also be deleted.
-        </p>
+        {createImpact ? <ImpactSummary impact={createImpact} /> : null}
+      </Dialog>
+
+      <Dialog
+        open={Boolean(toDelete)}
+        onClose={() => {
+          setToDelete(null);
+          setDeleteImpact(null);
+        }}
+        title="Delete level"
+        description={toDelete ? `"${toDelete.title}" will be removed from the track.` : undefined}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setToDelete(null);
+                setDeleteImpact(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => handleDelete(Boolean(deleteImpact))}
+              loading={busy}
+            >
+              {deleteImpact ? "Delete anyway" : "Delete"}
+            </Button>
+          </>
+        }
+      >
+        {deleteImpact ? (
+          <ImpactSummary impact={deleteImpact} />
+        ) : toDelete ? (
+          <p className="text-sm text-muted">
+            The remaining levels will be renumbered so the sequence stays continuous. If this level has
+            participant activity, its submissions, source code and completion history are archived and
+            preserved rather than deleted.
+          </p>
+        ) : null}
       </Dialog>
     </div>
   );

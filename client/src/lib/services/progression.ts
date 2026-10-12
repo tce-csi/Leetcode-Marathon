@@ -12,6 +12,10 @@ export interface ProgressSummary {
   lastScoreAt: string | null;
   /** ISO UTC string set once the student completes every level. Null otherwise. */
   finishedAt: string | null;
+  /** ISO UTC string set once the student explicitly submits the contest for review. */
+  finalizedAt: string | null;
+  /** Personal contest start (server-authoritative, one-time stamp). */
+  startedAt: string | null;
   /** UTC time when the student's contest effectively started. */
   contestStartedAt: string | null;
   /** Milliseconds elapsed from effective start to finish. */

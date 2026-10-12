@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { Tabs } from "@/components/ui/tabs";
 import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import { formatDate } from "@/lib/format";
 import type { FlagKind, FlagSeverity, Year } from "@/lib/types";
 
@@ -61,6 +62,20 @@ export default function AdminFlagsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Silent background refresh without resetting to the loading state or toasting.
+  const refresh = useCallback(async () => {
+    try {
+      const { flags: result } = await api.get<{ flags: ReviewFlag[] }>(
+        `/api/admin/flags?openOnly=${openOnly === "open"}`,
+      );
+      setFlags(result);
+    } catch {
+      // transient background failures keep the last good data
+    }
+  }, [openOnly]);
+
+  useAutoRefresh(refresh, 8000);
 
   const resolve = async (id: string) => {
     setBusyId(id);

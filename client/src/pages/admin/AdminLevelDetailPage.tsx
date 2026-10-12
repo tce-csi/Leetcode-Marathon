@@ -18,8 +18,16 @@ import { Dialog } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageLoader } from "@/components/ui/feedback";
 import { api, isApiError } from "@/lib/api-client";
+import { useAutoRefresh } from "@/lib/use-auto-refresh";
 import type { AdminLevelRow, AdminQuestion } from "@/lib/services/admin";
 import type { ContestTrackRow, QuestionPhase } from "@/lib/types";
+
+const questionTypeLabels: Record<string, string> = {
+  SINGLE_CHOICE: "Multiple Choice (single)",
+  MULTIPLE_CHOICE: "Multiple Choice (multi)",
+  TRUE_FALSE: "True / False",
+  SHORT_TEXT: "Short Text Answer",
+};
 
 interface LevelsResponse {
   tracks: ContestTrackRow[];
@@ -58,6 +66,23 @@ export default function AdminLevelDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Silent background refresh (does not toast or disturb editing state).
+  const refresh = useCallback(async () => {
+    try {
+      const [levelsRes, questionsRes] = await Promise.all([
+        api.get<LevelsResponse>("/api/admin/levels"),
+        api.get<{ questions: AdminQuestion[] }>(`/api/admin/questions?levelId=${levelId}`),
+      ]);
+      setTracks(levelsRes.tracks);
+      setLevel(levelsRes.levels.find((l) => l.id === levelId) ?? null);
+      setQuestions(questionsRes.questions);
+    } catch {
+      // transient background failures keep the last good data
+    }
+  }, [levelId]);
+
+  useAutoRefresh(refresh, 8000);
 
   const saveLevel = async (values: LevelFormValues) => {
     setBusy(true);
@@ -132,7 +157,6 @@ export default function AdminLevelDetailPage() {
 
   const initialLevel: LevelFormValues = {
     trackId: level.track_id,
-    levelNumber: level.level_number,
     title: level.title,
     description: level.description,
     teaser: level.teaser,
@@ -183,6 +207,7 @@ export default function AdminLevelDetailPage() {
             initial={initialLevel}
             submitLabel="Save changes"
             busy={busy}
+            trackLocked
             onSubmit={saveLevel}
           />
         </CardContent>
@@ -216,9 +241,9 @@ export default function AdminLevelDetailPage() {
                     <div className="min-w-0">
                       <p className="text-sm font-medium">{question.question_text}</p>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
-                        <Badge variant="neutral">{question.question_type.replace("_", " ")}</Badge>
+                        <Badge variant="neutral">{questionTypeLabels[question.question_type] ?? question.question_type}</Badge>
                         <span>{question.points} pts</span>
-                        <span>{question.options.length} options</span>
+                        <span>{question.min_length || question.max_length ? `${question.min_length ?? 1}–${question.max_length ?? 4000} chars` : `${question.options.length} options`}</span>
                         {!question.is_active ? <Badge variant="danger">Inactive</Badge> : null}
                       </div>
                     </div>
@@ -259,6 +284,8 @@ export default function AdminLevelDetailPage() {
               correctText: editing.correct_text ?? "",
               explanation: editing.explanation,
               variantGroup: editing.variant_group ?? "",
+              minLength: editing.min_length ?? undefined,
+              maxLength: editing.max_length ?? undefined,
               isActive: editing.is_active,
               options: editing.options.map((o) => ({ optionText: o.option_text, isCorrect: o.is_correct })),
             }}

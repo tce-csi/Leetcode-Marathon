@@ -4,8 +4,9 @@ import { errors } from "@/lib/errors";
 import {
   getLevelContext,
   evaluateLevelCompletion,
-  getNextLevel,
+  nextRoadmapLevel,
   type RoadmapLevel,
+  type TrackLevelSummary,
 } from "@/lib/services/progression";
 import { awardPoints } from "@/lib/services/scoring";
 import type {
@@ -15,7 +16,6 @@ import type {
   LevelRow,
   QuestionPhase,
   QuestionType,
-  StudentLevelProgressRow,
   StudentRow,
 } from "@/lib/types";
 import type { AssessmentSubmitInput } from "@/lib/validation/assessment";
@@ -31,6 +31,9 @@ export interface AssessmentQuestionView {
   type: QuestionType;
   points: number;
   options: QuestionOptionView[];
+  /** Character bounds for SHORT_TEXT questions (null when the server defaults apply). */
+  minLength: number | null;
+  maxLength: number | null;
 }
 
 export interface PhaseState {
@@ -40,6 +43,9 @@ export interface PhaseState {
   maxAttempts: number;
   remainingAttempts: number;
   passed: boolean;
+  /** Whether this phase's single submission is locked in (one-submission policy). */
+  submitted: boolean;
+  submittedAt: string | null;
   latestAttempt: {
     id: string;
     score: number;
@@ -188,11 +194,15 @@ export async function getAssessmentState(
       [student.id, level.id, phase],
     );
     const passed = attempts.rows.some((a) => a.status === "GRADED" && a.passed);
+    const submission = attempts.rows.find((a) => a.is_submission) ?? null;
     const latest = attempts.rows[0] ?? null;
-    const hasSubmitted = attempts.rows.some(
-      (a) => a.status === "SUBMITTED" || a.status === "GRADED",
-    );
+    const hasSubmitted = Boolean(submission);
     if (phase === "BEFORE" && hasSubmitted) beforeSubmitted = true;
+
+    // One-submission policy: `maxAttempts` is always 1. A locked-in submission
+    // is permanent (unlike coding submissions there is no unlock/rejection path),
+    // so once the single submission exists the phase is exhausted.
+    const submitted = hasSubmitted;
 
     phaseStates.push({
       phase,
@@ -202,11 +212,15 @@ export async function getAssessmentState(
         type: q.question_type,
         points: q.points,
         options: q.options.map((o) => ({ id: o.option_id!, text: o.option_text! })),
+        minLength: q.min_length,
+        maxLength: q.max_length,
       })),
-      attemptsUsed: attempts.rows.length,
-      maxAttempts: level.max_attempts,
-      remainingAttempts: Math.max(0, level.max_attempts - attempts.rows.length),
+      attemptsUsed: submitted ? 1 : 0,
+      maxAttempts: 1,
+      remainingAttempts: submitted ? 0 : 1,
       passed,
+      submitted,
+      submittedAt: submission?.submitted_at ?? null,
       latestAttempt: latest
         ? {
             id: latest.id,
@@ -236,8 +250,140 @@ export async function getAssessmentState(
   };
 }
 
-function normalizeShortAnswer(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+const SHORT_TEXT_MIN_DEFAULT = 1;
+const SHORT_TEXT_MAX_DEFAULT = 4000;
+
+interface IncomingAnswer {
+  questionId: string;
+  selectedOptionIds?: string[];
+  textAnswer?: string;
+}
+
+interface StoredAnswerRow {
+  question_id: string;
+  selected_option_ids: string[] | null;
+  text_answer: string | null;
+}
+
+/**
+ * Validates a full quiz payload BEFORE any attempt row is created, so invalid
+ * or incomplete submissions never consume the one allowed submission.
+ */
+function validateAnswersBeforeSubmit(
+  questions: QuestionWithOptions[],
+  answerByQuestion: Map<string, IncomingAnswer>,
+): void {
+  for (const question of questions) {
+    const answer = answerByQuestion.get(question.id);
+    if (question.question_type === "SHORT_TEXT") {
+      const min = question.min_length ?? SHORT_TEXT_MIN_DEFAULT;
+      const max = question.max_length ?? SHORT_TEXT_MAX_DEFAULT;
+      const text = answer?.textAnswer?.trim() ?? "";
+      if (text.length === 0) {
+        throw errors.badRequest("Answer every question before submitting.");
+      }
+      if (text.length < min) {
+        throw errors.badRequest(
+          `Your answer is too short (minimum ${min} characters).`,
+        );
+      }
+      if (text.length > max) {
+        throw errors.badRequest(
+          `Your answer is too long (maximum ${max} characters).`,
+        );
+      }
+    } else if (!answer || (answer.selectedOptionIds ?? []).length === 0) {
+      throw errors.badRequest("Answer every question before submitting.");
+    }
+  }
+}
+
+/**
+ * True when the incoming payload is byte-for-byte (after trimming) identical to
+ * the stored submission. Used to make retries of an already-accepted submission
+ * idempotent without allowing a changed payload to overwrite the immutable row.
+ */
+function payloadsMatch(
+  stored: StoredAnswerRow[],
+  incoming: IncomingAnswer[],
+): boolean {
+  if (stored.length !== incoming.length) return false;
+  const byQuestion = new Map(stored.map((row) => [row.question_id, row]));
+  for (const answer of incoming) {
+    const row = byQuestion.get(answer.questionId);
+    if (!row) return false;
+    if ((answer.selectedOptionIds ?? []).length !== (row.selected_option_ids ?? []).length) {
+      return false;
+    }
+    const selected = new Set(row.selected_option_ids ?? []);
+    if (!(answer.selectedOptionIds ?? []).every((id) => selected.has(id))) return false;
+    if ((answer.textAnswer?.trim() ?? "") !== (row.text_answer?.trim() ?? "")) return false;
+  }
+  return true;
+}
+
+/**
+ * Reconstructs the submission result for an already-accepted payload. The
+ * submission already fired its points/progression side effects exactly once, so
+ * this path only rebuilds the response and re-runs the (idempotent) completion
+ * evaluation in case the original response was lost in transit.
+ */
+async function buildIdempotentResult(
+  tx: Db,
+  student: StudentRow,
+  level: LevelRow,
+  questions: QuestionWithOptions[],
+  submission: AssessmentAttemptRow,
+  trackLevels: TrackLevelSummary[],
+  totalLevels: number,
+): Promise<SubmitResult> {
+  const storedAnswers = await tx.query<{
+    question_id: string;
+    is_correct: boolean | null;
+    points_awarded: number;
+  }>(
+    "select question_id, is_correct, points_awarded from assessment_answers where attempt_id = $1",
+    [submission.id],
+  );
+  const byQuestion = new Map(storedAnswers.rows.map((r) => [r.question_id, r]));
+  let requiresManual = false;
+  const answers: GradedAnswer[] = questions.map((question) => {
+    const stored = byQuestion.get(question.id);
+    const isCorrect = stored?.is_correct ?? null;
+    if (isCorrect === null) requiresManual = true;
+    return {
+      questionId: question.id,
+      isCorrect,
+      pointsAwarded: stored?.points_awarded ?? 0,
+      correctOptionIds: question.options.filter((o) => o.is_correct).map((o) => o.option_id!),
+      correctText: question.correct_text,
+      explanation: question.explanation,
+    };
+  });
+
+  const percent =
+    submission.max_score === 0 ? 100 : Math.round((submission.score / submission.max_score) * 100);
+  const completed = await evaluateLevelCompletion(tx, student, level, {
+    trackTotalLevels: totalLevels,
+    trackCompletedLevels: trackLevels.filter(
+      (t) => t.progress_status === "COMPLETED" && t.id !== level.id,
+    ).length,
+  });
+  const nextLevel = completed ? nextRoadmapLevel(trackLevels, level) : null;
+
+  return {
+    attemptId: submission.id,
+    status: submission.status,
+    score: submission.score,
+    maxScore: submission.max_score,
+    percent,
+    passed: submission.passed,
+    requiresManualGrading: requiresManual,
+    answers,
+    nextLevel,
+    completed,
+    totalLevels,
+  };
 }
 
 export interface GradedAnswer {
@@ -260,6 +406,7 @@ export interface SubmitResult {
   answers: GradedAnswer[];
   nextLevel?: RoadmapLevel | null;
   completed?: boolean;
+  totalLevels?: number;
 }
 
 export async function submitAssessment(
@@ -267,7 +414,7 @@ export async function submitAssessment(
   input: AssessmentSubmitInput,
   db: Db = getDb(),
 ): Promise<SubmitResult> {
-  const { level } = await getLevelContext(student, input.levelId, db);
+  const { level, trackLevels, totalLevels } = await getLevelContext(student, input.levelId, db);
   const qCountResult = await db.query<{ count: number }>(
     `select count(*)::int as count from conceptual_questions where level_id = $1 and phase = $2 and is_active = true`,
     [level.id, input.phase],
@@ -287,25 +434,84 @@ export async function submitAssessment(
     throw errors.badRequest("There are no questions for this phase.");
   }
 
-  const attemptsUsed = await db.query<{ count: number }>(
-    `select count(*)::int as count from assessment_attempts
-      where student_id = $1 and level_id = $2 and phase = $3`,
-    [student.id, level.id, input.phase],
-  );
-  const used = attemptsUsed.rows[0]?.count ?? 0;
-  if (used >= level.max_attempts) {
-    throw errors.conflict("You have used all of your attempts for this assessment.");
-  }
-
   const answerByQuestion = new Map(input.answers.map((a) => [a.questionId, a]));
 
+  // A finalized contest is frozen for review. Checked before payload validation
+  // so a frozen student is always told the attempt is locked, regardless of the
+  // payload's own validity (and before any attempt row could be created).
+  const frozenCheck = await db.query<Pick<StudentRow, "finalized_at">>(
+    "select finalized_at from students where id = $1",
+    [student.id],
+  );
+  if (frozenCheck.rows[0]?.finalized_at) {
+    throw errors.conflict(
+      "This contest has been submitted for review and can no longer be changed.",
+    );
+  }
+
+  // Validate the full payload before any attempt row exists, so an invalid or
+  // incomplete submission never consumes the single allowed attempt.
+  validateAnswersBeforeSubmit(questions, answerByQuestion);
+
   return db.transaction(async (tx) => {
+    // A finalized contest is frozen for review — no further assessment attempts.
+    const frozen = await tx.query<Pick<StudentRow, "finalized_at">>(
+      "select finalized_at from students where id = $1 for update",
+      [student.id],
+    );
+    if (frozen.rows[0]?.finalized_at) {
+      throw errors.conflict(
+        "This contest has been submitted for review and can no longer be changed.",
+      );
+    }
+
+    // One-submission slot: at most one is_submission row per (student, level,
+    // phase). The row lock on `students` serialises concurrent submissions, and
+    // the partial unique index is the final backstop for any path that slips
+    // past the check.
+    const existing = await tx.query<AssessmentAttemptRow>(
+      `select * from assessment_attempts
+        where student_id = $1 and level_id = $2 and phase = $3 and is_submission = true
+        limit 1`,
+      [student.id, level.id, input.phase],
+    );
+    const submission = existing.rows[0] ?? null;
+    if (submission) {
+      const stored = await tx.query<StoredAnswerRow>(
+        `select question_id, selected_option_ids, text_answer
+           from assessment_answers where attempt_id = $1`,
+        [submission.id],
+      );
+      if (payloadsMatch(stored.rows, input.answers)) {
+        // Idempotent retry of an already-accepted submission (e.g. a lost
+        // network response). Side effects already fired — only the result is
+        // rebuilt.
+        return buildIdempotentResult(
+          tx,
+          student,
+          level,
+          questions,
+          submission,
+          trackLevels,
+          totalLevels,
+        );
+      }
+      throw errors.conflict("This quiz has already been submitted and cannot be changed.");
+    }
+
+    const attemptNumberResult = await tx.query<{ max: number }>(
+      `select coalesce(max(attempt_number), 0) as max from assessment_attempts
+        where student_id = $1 and level_id = $2 and phase = $3`,
+      [student.id, level.id, input.phase],
+    );
+    const attemptNumber = (attemptNumberResult.rows[0]?.max ?? 0) + 1;
+
     const attempt = await tx.query<AssessmentAttemptRow>(
       `insert into assessment_attempts
          (student_id, level_id, phase, attempt_number, status, max_score)
        values ($1, $2, $3, $4, 'IN_PROGRESS', $5)
        returning *`,
-      [student.id, level.id, input.phase, used + 1, 0],
+      [student.id, level.id, input.phase, attemptNumber, 0],
     );
     const attemptId = attempt.rows[0]!.id;
 
@@ -313,6 +519,7 @@ export async function submitAssessment(
     let maxScore = 0;
     let requiresManual = false;
     const graded: GradedAnswer[] = [];
+    const answerRows: unknown[] = [];
 
     for (const question of questions) {
       maxScore += question.points;
@@ -321,25 +528,20 @@ export async function submitAssessment(
       let isCorrect: boolean | null = false;
       let pointsAwarded = 0;
 
-      if (!answer) {
-        isCorrect = false;
-      } else if (question.question_type === "SHORT_TEXT") {
-        if (question.correct_text) {
-          isCorrect =
-            normalizeShortAnswer(answer.textAnswer ?? "") ===
-            normalizeShortAnswer(question.correct_text);
-        } else {
-          isCorrect = null;
-          requiresManual = true;
-        }
+      if (question.question_type === "SHORT_TEXT") {
+        // Short text answers are evidence for the organisers. They are never
+        // auto-classified as correct/incorrect (no keyword matching, no AI
+        // grading), so they always await manual review and award no points here.
+        isCorrect = null;
+        requiresManual = true;
       } else if (
         question.question_type === "SINGLE_CHOICE" ||
         question.question_type === "TRUE_FALSE"
       ) {
-        const selected = answer.selectedOptionIds ?? [];
+        const selected = answer?.selectedOptionIds ?? [];
         isCorrect = selected.length === 1 && correctOptions.length === 1 && selected[0] === correctOptions[0];
       } else {
-        const selected = new Set(answer.selectedOptionIds ?? []);
+        const selected = new Set(answer?.selectedOptionIds ?? []);
         const correct = new Set(correctOptions);
         isCorrect =
           selected.size === correct.size && [...selected].every((id) => correct.has(id));
@@ -348,18 +550,13 @@ export async function submitAssessment(
       if (isCorrect === true) pointsAwarded = question.points;
       score += pointsAwarded;
 
-      await tx.query(
-        `insert into assessment_answers
-           (attempt_id, question_id, selected_option_ids, text_answer, is_correct, points_awarded)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [
-          attemptId,
-          question.id,
-          answer?.selectedOptionIds ?? [],
-          answer?.textAnswer ?? null,
-          isCorrect,
-          pointsAwarded,
-        ],
+      answerRows.push(
+        attemptId,
+        question.id,
+        answer?.selectedOptionIds ?? [],
+        answer?.textAnswer ?? null,
+        isCorrect,
+        pointsAwarded,
       );
 
       graded.push({
@@ -372,17 +569,66 @@ export async function submitAssessment(
       });
     }
 
+    if (answerRows.length > 0) {
+      const rowCount = answerRows.length / 6;
+      const placeholders = Array.from(
+        { length: rowCount },
+        (_, r) => `($${r * 6 + 1}, $${r * 6 + 2}, $${r * 6 + 3}, $${r * 6 + 4}, $${r * 6 + 5}, $${r * 6 + 6})`,
+      ).join(", ");
+      await tx.query(
+        `insert into assessment_answers
+           (attempt_id, question_id, selected_option_ids, text_answer, is_correct, points_awarded)
+         values ${placeholders}`,
+        answerRows,
+      );
+    }
+
     const percent = maxScore === 0 ? 100 : Math.round((score / maxScore) * 100);
     const status = requiresManual ? "SUBMITTED" : "GRADED";
     const passed = !requiresManual && percent >= level.passing_score;
 
-    await tx.query(
-      `update assessment_attempts
-          set status = $2, score = $3, max_score = $4, passed = $5,
-              submitted_at = now(), graded_at = $6
-        where id = $1`,
-      [attemptId, status, score, maxScore, passed, requiresManual ? null : new Date().toISOString()],
-    );
+    try {
+      await tx.query(
+        `update assessment_attempts
+            set status = $2, score = $3, max_score = $4, passed = $5,
+                submitted_at = now(), graded_at = $6, is_submission = true
+          where id = $1`,
+        [attemptId, status, score, maxScore, passed, requiresManual ? null : new Date().toISOString()],
+      );
+    } catch (error) {
+      // Race guard: a concurrent request claimed the one-submission slot between
+      // our check and this UPDATE. When the winner stored the identical payload
+      // the request is idempotent; otherwise it is an immutable-submission
+      // conflict — never a bare database error.
+      if ((error as { code?: string }).code === "23505") {
+        const winner = await tx.query<AssessmentAttemptRow>(
+          `select * from assessment_attempts
+            where student_id = $1 and level_id = $2 and phase = $3 and is_submission = true
+            limit 1`,
+          [student.id, level.id, input.phase],
+        );
+        if (winner.rows[0]) {
+          const stored = await tx.query<StoredAnswerRow>(
+            `select question_id, selected_option_ids, text_answer
+               from assessment_answers where attempt_id = $1`,
+            [winner.rows[0].id],
+          );
+          if (payloadsMatch(stored.rows, input.answers)) {
+            return buildIdempotentResult(
+              tx,
+              student,
+              level,
+              questions,
+              winner.rows[0],
+              trackLevels,
+              totalLevels,
+            );
+          }
+        }
+        throw errors.conflict("This quiz has already been submitted and cannot be changed.");
+      }
+      throw error;
+    }
 
     if (passed) {
       await awardPoints(
@@ -399,14 +645,13 @@ export async function submitAssessment(
       );
     }
 
-    await evaluateLevelCompletion(tx, student, level);
-
-    const progress = await tx.query<StudentLevelProgressRow>(
-      "select status from student_level_progress where student_id = $1 and level_id = $2",
-      [student.id, level.id],
-    );
-    const completed = progress.rows[0]?.status === "COMPLETED";
-    const nextLevel = completed ? await getNextLevel(tx, student.id, level) : null;
+    const completed = await evaluateLevelCompletion(tx, student, level, {
+      trackTotalLevels: totalLevels,
+      trackCompletedLevels: trackLevels.filter(
+        (t) => t.progress_status === "COMPLETED" && t.id !== level.id,
+      ).length,
+    });
+    const nextLevel = completed ? nextRoadmapLevel(trackLevels, level) : null;
 
     return {
       attemptId,
@@ -419,18 +664,25 @@ export async function submitAssessment(
       answers: graded,
       nextLevel,
       completed,
+      totalLevels,
     };
   });
 }
 
+export interface AttemptAnswerDetail {
+  questionId: string;
+  questionText: string;
+  questionType: QuestionType;
+  isCorrect: boolean | null;
+  pointsAwarded: number;
+  selectedOptionIds: string[];
+  selectedOptions: { id: string; text: string }[];
+  textAnswer: string | null;
+}
+
 export interface AttemptDetail {
   attempt: AssessmentAttemptRow;
-  answers: {
-    questionId: string;
-    questionText: string;
-    isCorrect: boolean | null;
-    pointsAwarded: number;
-  }[];
+  answers: AttemptAnswerDetail[];
 }
 
 export async function getAttemptsForStudent(
@@ -438,36 +690,63 @@ export async function getAttemptsForStudent(
   levelId: string,
   db: Db = getDb(),
 ): Promise<AttemptDetail[]> {
-  const attempts = await db.query<AssessmentAttemptRow>(
-    `select * from assessment_attempts where student_id = $1 and level_id = $2 order by attempt_number desc`,
+  const { rows } = await db.query<
+    AssessmentAttemptRow & {
+      answers: {
+        question_id: string;
+        question_text: string;
+        question_type: QuestionType;
+        is_correct: boolean | null;
+        points_awarded: number;
+        selected_option_ids: string[];
+        selected_options: { id: string; text: string }[];
+        text_answer: string | null;
+      }[];
+    }
+  >(
+    `select a.*,
+            coalesce(
+              json_agg(json_build_object(
+                'question_id', q.id,
+                'question_text', q.question_text,
+                'question_type', q.question_type,
+                'is_correct', aa.is_correct,
+                'points_awarded', aa.points_awarded,
+                'selected_option_ids', coalesce(aa.selected_option_ids, '{}'),
+                'text_answer', aa.text_answer,
+                'selected_options', coalesce(
+                  (select json_agg(json_build_object('id', o.id, 'text', o.option_text))
+                     from answer_options o
+                    where o.id = any(aa.selected_option_ids)),
+                  '[]'::json
+                )
+              ) order by q.order_index asc) filter (where q.id is not null),
+              '[]'::json
+            ) as answers
+       from assessment_attempts a
+       left join assessment_answers aa on aa.attempt_id = a.id
+       left join conceptual_questions q on q.id = aa.question_id
+      where a.student_id = $1 and a.level_id = $2
+      group by a.id
+      order by a.attempt_number desc`,
     [studentId, levelId],
   );
-  const details: AttemptDetail[] = [];
-  for (const attempt of attempts.rows) {
-    const answers = await db.query<{
-      question_id: string;
-      question_text: string;
-      is_correct: boolean | null;
-      points_awarded: number;
-    }>(
-      `select a.question_id, q.question_text, a.is_correct, a.points_awarded
-         from assessment_answers a
-         join conceptual_questions q on q.id = a.question_id
-        where a.attempt_id = $1
-        order by q.order_index asc`,
-      [attempt.id],
-    );
-    details.push({
+  return rows.map((row) => {
+    const { answers, ...attempt } = row;
+    return {
       attempt,
-      answers: answers.rows.map((row) => ({
-        questionId: row.question_id,
-        questionText: row.question_text,
-        isCorrect: row.is_correct,
-        pointsAwarded: row.points_awarded,
+      answers: answers.map((answer) => ({
+        questionId: answer.question_id,
+        questionText: answer.question_text,
+        questionType: answer.question_type,
+        isCorrect: answer.is_correct,
+        pointsAwarded: answer.points_awarded,
+        selectedOptionIds: answer.selected_option_ids ?? [],
+        selectedOptions: answer.selected_options ?? [],
+        textAnswer: answer.text_answer,
       })),
-    });
-  }
-  return details;
+    };
+  });
 }
 
 /** Administrator grading of manual (short-text) answers. */
@@ -565,4 +844,26 @@ export async function gradeManualAnswers(
 
     return updated.rows[0]!;
   });
+}
+
+/**
+ * Records an admin review note/status on an assessment attempt WITHOUT touching
+ * the student's original answers. The submitted quiz stays immutable.
+ */
+export async function updateAssessmentReviewNote(
+  adminId: string,
+  attemptId: string,
+  note: string | null,
+  db: Db = getDb(),
+): Promise<AssessmentAttemptRow> {
+  const updated = await db.query<AssessmentAttemptRow>(
+    `update assessment_attempts
+        set review_note = $2, reviewed_by = $3, reviewed_at = now()
+      where id = $1
+      returning *`,
+    [attemptId, note?.trim() || null, adminId],
+  );
+  const attempt = updated.rows[0];
+  if (!attempt) throw errors.notFound("Assessment attempt not found.");
+  return attempt;
 }

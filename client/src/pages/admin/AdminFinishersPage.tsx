@@ -10,6 +10,7 @@ import {
   Medal,
   RefreshCw,
   Search,
+  ShieldCheck,
   Timer,
   Trophy,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import { PageLoader } from "@/components/ui/feedback";
 import { api } from "@/lib/api-client";
 import {
   finalistStatusMeta,
+  formatIST,
   formatISTTime,
   yearLabel,
 } from "@/lib/format";
@@ -38,6 +40,8 @@ export default function AdminFinishersPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<FinalistStatus | "ALL">("ALL");
   const [sortBy, setSortBy] = useState<"finished_at" | "elapsed">("finished_at");
+  // Default view: students who explicitly submitted their contest for review.
+  const [view, setView] = useState<"finalized" | "all">("finalized");
 
   const {
     data,
@@ -45,13 +49,14 @@ export default function AdminFinishersPage() {
     isFetching,
     refetch,
   } = useQuery({
-    queryKey: ["admin", "finishers", year, statusFilter, sortBy, search],
+    queryKey: ["admin", "finishers", year, statusFilter, sortBy, search, view],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("year", String(year));
       if (statusFilter !== "ALL") params.set("status", statusFilter);
       if (search.trim()) params.set("search", search.trim());
       params.set("sortBy", sortBy);
+      params.set("finalizedOnly", view === "finalized" ? "true" : "false");
 
       return api.get<{
         finishers: FinisherEntry[];
@@ -59,7 +64,7 @@ export default function AdminFinishersPage() {
         year: Year;
       }>(`/api/admin/finishers?${params.toString()}`);
     },
-    refetchInterval: 12000,
+    refetchInterval: 8000,
   });
 
   const finishers = data?.finishers ?? [];
@@ -67,13 +72,15 @@ export default function AdminFinishersPage() {
 
   const exportUrl = `/api/admin/finishers/export?year=${year}&sortBy=${sortBy}${
     statusFilter !== "ALL" ? `&status=${statusFilter}` : ""
-  }${search.trim() ? `&search=${encodeURIComponent(search.trim())}` : ""}`;
+  }${search.trim() ? `&search=${encodeURIComponent(search.trim())}` : ""}${
+    view === "finalized" ? "&finalizedOnly=true" : ""
+  }`;
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Contest Finishers"
-        description="Fastest participants who completed all required levels in their track. Review leading finishers to confirm winners."
+        description="Participants who completed all required levels and submitted their attempt for review. Review leading finishers to confirm winners."
         actions={
           <div className="flex items-center gap-2">
             <Button
@@ -192,6 +199,18 @@ export default function AdminFinishersPage() {
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <div className="flex items-center gap-1.5">
+            <ShieldCheck className="size-3.5 text-muted" />
+            <select
+              className="h-9 rounded-md border border-border bg-surface-1 px-2.5 text-xs font-medium"
+              value={view}
+              onChange={(e) => setView(e.target.value as typeof view)}
+            >
+              <option value="finalized">Submitted for Review</option>
+              <option value="all">All Completions</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5">
             <Filter className="size-3.5 text-muted" />
             <select
               className="h-9 rounded-md border border-border bg-surface-1 px-2.5 text-xs font-medium"
@@ -230,20 +249,24 @@ export default function AdminFinishersPage() {
           description={
             search
               ? "No finishers matched your search criteria."
-              : "Participants in this track will appear here automatically as soon as they complete all required levels."
+              : view === "finalized"
+                ? "Participants appear here once they complete all required levels and submit their contest for review."
+                : "Participants in this track will appear here automatically as soon as they complete all required levels."
           }
         />
       ) : (
         <Card className="overflow-x-auto border-border">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[980px] text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted bg-surface-2/40">
                 <th className="px-4 py-3 font-semibold w-16 text-center">Rank</th>
                 <th className="px-4 py-3 font-semibold">Student</th>
                 <th className="px-4 py-3 font-semibold">Roll Number</th>
                 <th className="px-4 py-3 font-semibold text-center">Completed</th>
+                <th className="px-4 py-3 font-semibold font-mono">Started At (IST)</th>
                 <th className="px-4 py-3 font-semibold font-mono">Finished At (IST)</th>
                 <th className="px-4 py-3 font-semibold font-mono">Elapsed</th>
+                <th className="px-4 py-3 font-semibold font-mono">Finalized At (IST)</th>
                 <th className="px-4 py-3 font-semibold text-center">Verification</th>
                 <th className="px-4 py-3 text-right" />
               </tr>
@@ -284,6 +307,11 @@ export default function AdminFinishersPage() {
                       <div className="flex items-center gap-1.5">
                         <p className="font-semibold text-foreground">{finisher.fullName}</p>
                         {isTop3 && <Medal className="size-3.5 text-foreground opacity-80" />}
+                        {finisher.finalizedAt ? (
+                          <Badge className="border-foreground bg-foreground/5 text-foreground gap-1">
+                            <ShieldCheck className="size-3" /> Submitted
+                          </Badge>
+                        ) : null}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5">
                         {finisher.leetcodeProfileUrl ? (
@@ -312,6 +340,10 @@ export default function AdminFinishersPage() {
                       </span>
                     </td>
 
+                    <td className="px-4 py-3 font-mono text-xs text-muted-strong">
+                      {finisher.startedAt ? formatIST(finisher.startedAt) : "—"}
+                    </td>
+
                     <td className="px-4 py-3 font-mono text-xs text-foreground">
                       <div className="flex items-center gap-1.5">
                         <Clock className="size-3.5 text-muted shrink-0" />
@@ -324,6 +356,10 @@ export default function AdminFinishersPage() {
                         <Timer className="size-3.5 text-muted shrink-0" />
                         <span>{finisher.elapsedFormatted}</span>
                       </div>
+                    </td>
+
+                    <td className="px-4 py-3 font-mono text-xs text-muted-strong">
+                      {finisher.finalizedAt ? formatIST(finisher.finalizedAt) : "—"}
                     </td>
 
                     <td className="px-4 py-3 text-center">

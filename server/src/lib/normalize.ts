@@ -120,3 +120,62 @@ export function parseLeetcodeProfileUrl(input: string): LeetcodeProfile | null {
 export function isLeetcodeProfileUrl(url: string): boolean {
   return parseLeetcodeProfileUrl(url) !== null;
 }
+
+/** Shared, user-facing validation message for submission URLs. */
+export const LEETCODE_SUBMISSION_URL_MESSAGE =
+  "Please enter a valid LeetCode submission detail URL, for example: https://leetcode.com/submissions/detail/2165837360/";
+
+/** Canonical submission-detail path: /submissions/detail/<digits>, slash optional. */
+const SUBMISSION_DETAIL_PATH_RE = /^\/submissions\/detail\/(\d+)\/?$/;
+
+export interface LeetcodeSubmissionDetail {
+  /** Numeric LeetCode submission id. */
+  id: string;
+  /** Canonical URL: https://leetcode.com/submissions/detail/<id>/ */
+  url: string;
+}
+
+/**
+ * Parses a LeetCode **submission detail** URL.
+ *
+ * Accepts HTTPS URLs on leetcode.com (or www.leetcode.com) of the exact form:
+ *   - https://leetcode.com/submissions/detail/<digits>/
+ *   - https://leetcode.com/submissions/detail/<digits>   (trailing slash optional)
+ *
+ * Rejects other hosts/schemes, credentials, ports, query strings, fragments,
+ * extra path segments, and non-numeric submission ids. Valid URLs are
+ * normalised to the canonical `https://leetcode.com/submissions/detail/<id>/`.
+ */
+export function parseLeetcodeSubmissionDetailUrl(
+  input: string | null | undefined,
+): LeetcodeSubmissionDetail | null {
+  if (typeof input !== "string") return null;
+  const raw = input.trim();
+  if (!raw) return null;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") return null;
+  if (url.username || url.password) return null;
+  if (url.port) return null;
+  if (url.search) return null;
+  if (url.hash) return null;
+
+  const host = url.hostname.toLowerCase();
+  if (host !== "leetcode.com" && host !== "www.leetcode.com") return null;
+
+  const match = SUBMISSION_DETAIL_PATH_RE.exec(url.pathname);
+  if (!match) return null;
+
+  const id = match[1]!;
+  return { id, url: `https://leetcode.com/submissions/detail/${id}/` };
+}
+
+export function isLeetcodeSubmissionDetailUrl(url: string): boolean {
+  return parseLeetcodeSubmissionDetailUrl(url) !== null;
+}

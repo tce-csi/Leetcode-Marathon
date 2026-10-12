@@ -18,6 +18,12 @@ export interface FinisherListOptions {
   search?: string;
   sortBy?: "finished_at" | "elapsed";
   verifiedOnly?: boolean;
+  /**
+   * Restrict to students who explicitly submitted their contest for review
+   * (`finalized_at is not null`). When omitted the list keeps its original
+   * semantics: every student who completed all levels (`finished_at`).
+   */
+  finalizedOnly?: boolean;
 }
 
 export async function listFinishers(
@@ -31,6 +37,10 @@ export async function listFinishers(
     "s.finished_at is not null",
   ];
   const values: unknown[] = [contestId, options.year];
+
+  if (options.finalizedOnly) {
+    clauses.push("s.finalized_at is not null");
+  }
 
   if (options.verifiedOnly) {
     clauses.push("s.finalist_status = 'VERIFIED'");
@@ -48,8 +58,8 @@ export async function listFinishers(
 
   const orderBy =
     options.sortBy === "elapsed"
-      ? "s.elapsed_duration_ms asc, s.finished_at asc, s.created_at asc"
-      : "s.finished_at asc, s.elapsed_duration_ms asc, s.created_at asc";
+      ? "official_elapsed_ms asc, coalesce(s.finalized_at, s.finished_at) asc, s.created_at asc"
+      : "s.finished_at asc, official_elapsed_ms asc, s.created_at asc";
 
   // Get total levels for this track
   const trackLevelsResult = await db.query<{ count: number }>(
@@ -61,8 +71,12 @@ export async function listFinishers(
   );
   const totalLevelsCount = trackLevelsResult.rows[0]?.count ?? 0;
 
+  // Official elapsed: personal timer ends when the student finalizes (falls back
+  // to the automatic finish timestamp), then to the stored duration for legacy
+  // rows that predate the personal timer (`started_at` null).
   const { rows } = await db.query<
     StudentRow & {
+      official_elapsed_ms: number | null;
       completed_levels: number;
       total_points: number;
     }
@@ -77,7 +91,13 @@ export async function listFinishers(
               select sum(se.points)::int
                 from score_events se
                where se.student_id = s.id
-            ), 0) as total_points
+            ), 0) as total_points,
+            coalesce(
+              case when s.started_at is not null
+                then (extract(epoch from (coalesce(s.finalized_at, s.finished_at) - s.started_at)) * 1000)::bigint
+              end,
+              s.elapsed_duration_ms
+            ) as official_elapsed_ms
        from students s
       where ${clauses.join(" and ")}
       order by ${orderBy}`,
@@ -94,10 +114,12 @@ export async function listFinishers(
     leetcodeProfileUrl: row.leetcode_profile_url,
     completedLevels: row.completed_levels,
     totalLevels: totalLevelsCount,
+    startedAt: row.started_at ?? row.contest_started_at,
     contestStartedAt: row.contest_started_at,
     finishedAt: row.finished_at!,
-    elapsedDurationMs: Number(row.elapsed_duration_ms ?? 0),
-    elapsedFormatted: formatElapsed(Number(row.elapsed_duration_ms ?? 0)),
+    finalizedAt: row.finalized_at,
+    elapsedDurationMs: Number(row.official_elapsed_ms ?? 0),
+    elapsedFormatted: formatElapsed(Number(row.official_elapsed_ms ?? 0)),
     finalistStatus: row.finalist_status,
     finalistVerifiedAt: row.finalist_verified_at,
     finalistVerifiedBy: row.finalist_verified_by,
@@ -125,7 +147,12 @@ export async function getFinisherStats(
        count(*) filter (where is_active = true)::int as currently_participating,
        count(*) filter (where finished_at is not null)::int as total_finished,
        min(finished_at) as earliest_finish,
-       min(elapsed_duration_ms) filter (where finished_at is not null) as fastest_elapsed_ms,
+       min(coalesce(
+         case when started_at is not null
+           then (extract(epoch from (coalesce(finalized_at, finished_at) - started_at)) * 1000)::bigint
+         end,
+         elapsed_duration_ms
+       )) filter (where finished_at is not null) as fastest_elapsed_ms,
        count(*) filter (where finalist_status = 'VERIFIED')::int as verified_finalists
      from students
     where contest_id = $1 and year = $2`,
